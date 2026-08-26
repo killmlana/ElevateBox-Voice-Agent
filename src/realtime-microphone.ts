@@ -309,6 +309,18 @@ let firstAudioAt: number | undefined;
 let speechStoppedEventAt: number | undefined;
 let estimatedSpeechEndAt: number | undefined;
 let inputAudioClockStartedAt: number | undefined;
+interface PlaybackSegment {
+  itemId: string;
+  chunks: Buffer[];
+  offset: number;
+  queuedBytes: number;
+  durationMs: number;
+  firstAudioAt: number;
+  deliveredAudioMs: number;
+  playbackStartedAt?: number;
+  done: boolean;
+}
+
 let currentOutputItemId: string | undefined;
 let currentOutputDurationMs = 0;
 let currentOutputFirstAudioAt: number | undefined;
@@ -317,9 +329,7 @@ let currentPlaybackStartedAt: number | undefined;
 let currentOutputDone = false;
 let userSpeechActive = false;
 let interruptedOutputItemId: string | undefined;
-const playbackQueue: Buffer[] = [];
-let playbackQueueOffset = 0;
-let playbackQueuedBytes = 0;
+const playbackSegments: PlaybackSegment[] = [];
 const showPartials = process.env.REALTIME_SHOW_PARTIALS === "1";
 
 const resetOutputClock = (): void => {
@@ -332,74 +342,82 @@ const resetOutputClock = (): void => {
 };
 
 const clearPacedPlaybackQueue = (): void => {
-  playbackQueue.length = 0;
-  playbackQueueOffset = 0;
-  playbackQueuedBytes = 0;
+  playbackSegments.length = 0;
+  resetOutputClock();
 };
 
 const drainPlaybackChunk = (): void => {
-  if (playbackQueuedBytes === 0) {
+  const segment = playbackSegments[0];
+  if (!segment) {
+    resetOutputClock();
+    flushPendingImmediateDirectives();
+    return;
+  }
+  currentOutputItemId = segment.itemId;
+  currentOutputDurationMs = segment.durationMs;
+  currentOutputFirstAudioAt = segment.firstAudioAt;
+  currentDeliveredAudioMs = segment.deliveredAudioMs;
+  currentPlaybackStartedAt = segment.playbackStartedAt;
+  currentOutputDone = segment.done;
+
+  if (segment.queuedBytes === 0 && segment.done) {
     if (
-      currentOutputDone &&
-      (
-        currentPlaybackStartedAt === undefined ||
-        performance.now() - currentPlaybackStartedAt >= currentDeliveredAudioMs
-      )
+      segment.playbackStartedAt === undefined ||
+      performance.now() - segment.playbackStartedAt >= segment.deliveredAudioMs
     ) {
-      resetOutputClock();
-      flushPendingImmediateDirectives();
+      playbackSegments.shift();
+      drainPlaybackChunk();
     }
     return;
   }
   if (!speaker?.stdin?.writable) return;
   if (
-    currentPlaybackStartedAt === undefined &&
-    playbackQueuedBytes < PCM16_BYTES_PER_SECOND * (PLAYBACK_BUFFER_MS / 1000) &&
-    !currentOutputDone
+    segment.playbackStartedAt === undefined &&
+    segment.queuedBytes < PCM16_BYTES_PER_SECOND * (PLAYBACK_BUFFER_MS / 1000) &&
+    !segment.done
   ) return;
 
   const now = performance.now();
-  if (currentPlaybackStartedAt === undefined) {
-    currentPlaybackStartedAt = now;
+  if (segment.playbackStartedAt === undefined) {
+    segment.playbackStartedAt = now;
     trace.record("latency", "playback.started", {
       jitterBufferMs: PLAYBACK_BUFFER_MS,
-      ...(currentOutputFirstAudioAt === undefined
-        ? {}
-        : { modelAudioToPlaybackMs: now - currentOutputFirstAudioAt }),
+      modelAudioToPlaybackMs: now - segment.firstAudioAt,
+      itemId: segment.itemId,
     });
   }
-  const elapsedPlaybackMs = now - currentPlaybackStartedAt;
+  const elapsedPlaybackMs = now - segment.playbackStartedAt;
   const targetDeliveredMs = Math.min(
-    currentOutputDurationMs,
+    segment.durationMs,
     elapsedPlaybackMs + PLAYBACK_BUFFER_MS,
   );
-  const remainingDeliveryMs = targetDeliveredMs - currentDeliveredAudioMs;
+  const remainingDeliveryMs = targetDeliveredMs - segment.deliveredAudioMs;
   if (remainingDeliveryMs <= 0) return;
 
   const requestedBytes = Math.floor(
     (remainingDeliveryMs / 1000) * PCM16_BYTES_PER_SECOND / 2,
   ) * 2;
-  const targetBytes = Math.min(requestedBytes, playbackQueuedBytes);
+  const targetBytes = Math.min(requestedBytes, segment.queuedBytes);
   if (targetBytes <= 0) return;
   const output = Buffer.allocUnsafe(targetBytes);
   let written = 0;
   while (written < targetBytes) {
-    const head = playbackQueue[0];
+    const head = segment.chunks[0];
     if (!head) break;
-    const available = head.byteLength - playbackQueueOffset;
+    const available = head.byteLength - segment.offset;
     const take = Math.min(available, targetBytes - written);
-    head.copy(output, written, playbackQueueOffset, playbackQueueOffset + take);
+    head.copy(output, written, segment.offset, segment.offset + take);
     written += take;
-    playbackQueueOffset += take;
-    playbackQueuedBytes -= take;
-    if (playbackQueueOffset === head.byteLength) {
-      playbackQueue.shift();
-      playbackQueueOffset = 0;
+    segment.offset += take;
+    segment.queuedBytes -= take;
+    if (segment.offset === head.byteLength) {
+      segment.chunks.shift();
+      segment.offset = 0;
     }
   }
   if (written > 0) {
     speaker.stdin.write(written === output.byteLength ? output : output.subarray(0, written));
-    currentDeliveredAudioMs += (written / PCM16_BYTES_PER_SECOND) * 1000;
+    segment.deliveredAudioMs += (written / PCM16_BYTES_PER_SECOND) * 1000;
   }
 };
 
@@ -417,7 +435,7 @@ const playbackAudiblyIdle = (): boolean =>
   (
     speaker === undefined ||
     (
-      playbackQueuedBytes === 0 &&
+      playbackSegments.length === 0 &&
       (
         currentOutputItemId === undefined ||
         (
@@ -458,18 +476,43 @@ forwardRealtimeDirective = (directive) =>
     ? queueImmediateDirective(directive)
     : session.sendDirective(directive);
 
-const enqueuePlayback = (data: Uint8Array): void => {
-  playbackQueue.push(Buffer.from(data));
-  playbackQueuedBytes += data.byteLength;
+const enqueuePlayback = (data: Uint8Array, itemId: string): void => {
+  let segment = playbackSegments.at(-1);
+  if (!segment || segment.itemId !== itemId) {
+    segment = {
+      itemId,
+      chunks: [],
+      offset: 0,
+      queuedBytes: 0,
+      durationMs: 0,
+      firstAudioAt: performance.now(),
+      deliveredAudioMs: 0,
+      done: false,
+    };
+    playbackSegments.push(segment);
+  }
+  segment.chunks.push(Buffer.from(data));
+  segment.queuedBytes += data.byteLength;
+  segment.durationMs += (data.byteLength / PCM16_BYTES_PER_SECOND) * 1000;
+  const active = playbackSegments[0];
+  if (active) {
+    currentOutputItemId = active.itemId;
+    currentOutputDurationMs = active.durationMs;
+    currentOutputFirstAudioAt = active.firstAudioAt;
+    currentDeliveredAudioMs = active.deliveredAudioMs;
+    currentPlaybackStartedAt = active.playbackStartedAt;
+    currentOutputDone = active.done;
+  }
   drainPlaybackChunk();
 };
 
 const estimatedPlayedAudioMs = (): number => {
-  if (currentPlaybackStartedAt === undefined) return 0;
+  const segment = playbackSegments[0];
+  if (!segment || segment.playbackStartedAt === undefined) return 0;
   return Math.min(
-    currentOutputDurationMs,
-    currentDeliveredAudioMs,
-    Math.max(0, performance.now() - currentPlaybackStartedAt),
+    segment.durationMs,
+    segment.deliveredAudioMs,
+    Math.max(0, performance.now() - segment.playbackStartedAt),
   );
 };
 
@@ -560,17 +603,8 @@ try {
       // deltas from a truncated item into the replacement player.
       if (itemId === interruptedOutputItemId) continue;
       interruptedOutputItemId = undefined;
-      if (currentOutputItemId !== itemId) {
-        currentOutputItemId = itemId;
-        currentOutputDurationMs = 0;
-        currentOutputFirstAudioAt = audioAt;
-        currentDeliveredAudioMs = 0;
-        currentPlaybackStartedAt = undefined;
-        currentOutputDone = false;
-      }
       if (frame.data instanceof Uint8Array) {
-        currentOutputDurationMs += (frame.data.byteLength / PCM16_BYTES_PER_SECOND) * 1000;
-        enqueuePlayback(frame.data);
+        enqueuePlayback(frame.data, itemId);
       }
       if (speechStoppedEventAt !== undefined) {
         const postVadMs = audioAt - speechStoppedEventAt;
@@ -636,11 +670,25 @@ try {
         audioStartMs,
         itemId: event.payload.item_id,
       });
-    } else if (
-      event.type === "response.output_audio.done" ||
-      event.type === "response.done"
-    ) {
+    } else if (event.type === "response.output_audio.done") {
+      const itemId = typeof event.payload.item_id === "string"
+        ? event.payload.item_id
+        : currentOutputItemId;
+      const segment = playbackSegments.find((item) => item.itemId === itemId);
+      if (segment) segment.done = true;
+      if (segment?.itemId === currentOutputItemId) currentOutputDone = true;
+      drainPlaybackChunk();
+    } else if (event.type === "response.done") {
+      for (const segment of playbackSegments) segment.done = true;
       currentOutputDone = true;
+      trace.record("runtime", "realtime.response.done", {
+        status: event.payload.response && typeof event.payload.response === "object"
+          ? (event.payload.response as Record<string, unknown>).status
+          : undefined,
+        incompleteReason: event.payload.response && typeof event.payload.response === "object"
+          ? ((event.payload.response as Record<string, unknown>).status_details as Record<string, unknown> | undefined)?.reason
+          : undefined,
+      });
       drainPlaybackChunk();
     } else if (event.type === "user.speech_stopped") {
       userSpeechActive = false;

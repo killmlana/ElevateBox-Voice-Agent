@@ -366,3 +366,35 @@ test("queues an immediate action result until the active Realtime response compl
   assert.match(String(response.instructions), /Do not recap/i);
   await session.close();
 });
+
+test("continues a response that reports max-output truncation once", async () => {
+  const { session, socket } = await openTestSession();
+  socket.receive({ type: "response.created", response: { id: "resp-long" } });
+  socket.receive({
+    type: "response.done",
+    response: {
+      id: "resp-long",
+      status: "incomplete",
+      status_details: { reason: "max_output_tokens" },
+    },
+  });
+  const continuation = socket.sent.at(-1);
+  assert.equal(continuation?.type, "response.create");
+  assert.match(
+    String((continuation?.response as Record<string, unknown>).instructions),
+    /exactly where it stopped/i,
+  );
+  socket.receive({
+    type: "response.done",
+    response: {
+      id: "resp-long-continued",
+      status: "incomplete",
+      status_details: { reason: "max_output_tokens" },
+    },
+  });
+  assert.equal(
+    socket.sent.filter((event) => event.type === "response.create").length,
+    1,
+  );
+  await session.close();
+});

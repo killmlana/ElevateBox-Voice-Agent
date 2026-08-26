@@ -287,6 +287,7 @@ class OpenAIRealtimeSession implements ConversationSessionPort {
   private lastAssistantItemId?: string;
   private responseActive = false;
   private inputSpeechActive = false;
+  private incompleteContinuationAttempts = 0;
   private readonly pendingImmediateDirectives: ConversationDirective[] = [];
   private readonly sentImmediateDirectiveIds = new Set<string>();
   private preferredLanguage?: SupportedLanguage;
@@ -358,6 +359,7 @@ class OpenAIRealtimeSession implements ConversationSessionPort {
 
   async startConversation(instruction?: string): Promise<void> {
     this.assertUsable();
+    this.incompleteContinuationAttempts = 0;
     this.responseActive = true;
     this.send({
       event_id: this.nextEventId("response"),
@@ -636,6 +638,7 @@ class OpenAIRealtimeSession implements ConversationSessionPort {
 
     if (type === "input_audio_buffer.speech_started") {
       this.inputSpeechActive = true;
+      this.incompleteContinuationAttempts = 0;
       this.eventQueue.push({ type: "user.speech_started", payload: event });
       return;
     }
@@ -655,6 +658,33 @@ class OpenAIRealtimeSession implements ConversationSessionPort {
     if (type === "response.done") {
       this.responseActive = false;
       this.eventQueue.push({ type, payload: event });
+      const response = asRecord(event.response);
+      const status = response?.status;
+      const reason = asRecord(response?.status_details)?.reason;
+      if (
+        status === "incomplete" &&
+        reason === "max_output_tokens" &&
+        !this.inputSpeechActive &&
+        this.incompleteContinuationAttempts < 1
+      ) {
+        this.incompleteContinuationAttempts += 1;
+        this.responseActive = true;
+        this.send({
+          event_id: this.nextEventId("continuation"),
+          type: "response.create",
+          response: {
+            output_modalities: ["audio"],
+            instructions: "Continue the previous answer from exactly where it stopped. Do not repeat any completed sentence, recap, or ask a new question.",
+            max_output_tokens: this.config.maxOutputTokens,
+          },
+        });
+        this.eventQueue.push({
+          type: "runtime.response.continuation_requested",
+          payload: { reason, attempt: this.incompleteContinuationAttempts },
+        });
+      } else if (status !== "incomplete") {
+        this.incompleteContinuationAttempts = 0;
+      }
       this.flushImmediateDirective();
       return;
     }
