@@ -9,5 +9,6 @@ import "./model-lead-understanding.test.ts";
 import "./openai-realtime-runtime.test.ts";
 import "./openai-responses-lead-client.test.ts";
 import "./outbound-prompt.test.ts";
+import "./pcm-playback-clock.test.ts";
 import "./prepared-call-coordinator.test.ts";
 import "./prototype-system.test.ts";

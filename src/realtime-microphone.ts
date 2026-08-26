@@ -21,6 +21,7 @@ import { NodeRealtimeSocketFactory } from "./infrastructure/node-realtime-socket
 import { OpenAIRealtimeRuntime } from "./infrastructure/openai-realtime-runtime.ts";
 import { OpenAIResponsesLeadPatchClient } from "./infrastructure/openai-responses-lead-client.ts";
 import type { LeadRequestMetrics } from "./infrastructure/openai-responses-lead-client.ts";
+import { pacedPcmTargetBytes } from "./infrastructure/pcm-playback-clock.ts";
 import {
   ELEVATEBOX_OUTBOUND_PROMPT,
   ELEVATEBOX_OUTBOUND_START,
@@ -28,6 +29,8 @@ import {
 
 const SAMPLE_RATE_HZ = 24_000;
 const PCM16_BYTES_PER_SECOND = SAMPLE_RATE_HZ * 2;
+const audioMsForBytes = (bytes: number): number =>
+  (bytes / PCM16_BYTES_PER_SECOND) * 1000;
 const PLAYBACK_CHUNK_MS = 20;
 const PLAYBACK_BUFFER_MS = Number(process.env.REALTIME_PLAYBACK_BUFFER_MS ?? 80);
 if (
@@ -320,7 +323,8 @@ const startSpeaker = (): ChildProcess | undefined => {
     if (active?.playbackStartedAt !== undefined) {
       // A replacement sink must resume from the bytes already handed off,
       // rather than trying to catch up to wall-clock time in one burst.
-      active.playbackStartedAt = performance.now() - active.deliveredAudioMs;
+      active.playbackStartedAt =
+        performance.now() - audioMsForBytes(active.deliveredBytes);
     }
     trace.record("runtime", "speaker.closed", { code, signal });
     if (!stopping) {
@@ -357,10 +361,10 @@ interface PlaybackSegment {
   chunks: Buffer[];
   offset: number;
   queuedBytes: number;
-  durationMs: number;
+  totalBytes: number;
   firstAudioAt: number;
   lastAudioAt: number;
-  deliveredAudioMs: number;
+  deliveredBytes: number;
   playbackStartedAt?: number;
   done: boolean;
 }
@@ -400,16 +404,17 @@ const drainPlaybackChunk = (): void => {
     return;
   }
   currentOutputItemId = segment.itemId;
-  currentOutputDurationMs = segment.durationMs;
+  currentOutputDurationMs = audioMsForBytes(segment.totalBytes);
   currentOutputFirstAudioAt = segment.firstAudioAt;
-  currentDeliveredAudioMs = segment.deliveredAudioMs;
+  currentDeliveredAudioMs = audioMsForBytes(segment.deliveredBytes);
   currentPlaybackStartedAt = segment.playbackStartedAt;
   currentOutputDone = segment.done;
 
   if (segment.queuedBytes === 0 && segment.done) {
     if (
       segment.playbackStartedAt === undefined ||
-      performance.now() - segment.playbackStartedAt >= segment.deliveredAudioMs
+      performance.now() - segment.playbackStartedAt >=
+        audioMsForBytes(segment.deliveredBytes)
     ) {
       playbackSegments.shift();
       drainPlaybackChunk();
@@ -433,16 +438,17 @@ const drainPlaybackChunk = (): void => {
     });
   }
   const elapsedPlaybackMs = now - segment.playbackStartedAt;
-  const targetDeliveredMs = Math.min(
-    segment.durationMs,
-    elapsedPlaybackMs + PLAYBACK_BUFFER_MS,
-  );
-  const remainingDeliveryMs = targetDeliveredMs - segment.deliveredAudioMs;
-  if (remainingDeliveryMs <= 0) return;
-
-  const requestedBytes = Math.floor(
-    (remainingDeliveryMs / 1000) * PCM16_BYTES_PER_SECOND / 2,
-  ) * 2;
+  // Pace in exact PCM16 byte counts. Accumulating duration as floating-point
+  // milliseconds could strand one final 2-byte sample forever and block every
+  // later response behind the otherwise-complete segment.
+  const targetDeliveredBytes = pacedPcmTargetBytes({
+    totalBytes: segment.totalBytes,
+    elapsedMs: elapsedPlaybackMs,
+    bufferMs: PLAYBACK_BUFFER_MS,
+    bytesPerSecond: PCM16_BYTES_PER_SECOND,
+  });
+  const requestedBytes = targetDeliveredBytes - segment.deliveredBytes;
+  if (requestedBytes <= 0) return;
   const targetBytes = Math.min(requestedBytes, segment.queuedBytes);
   if (targetBytes <= 0) return;
   const output = Buffer.allocUnsafe(targetBytes);
@@ -475,7 +481,7 @@ const drainPlaybackChunk = (): void => {
       speakerBackpressured = true;
       trace.record("latency", "speaker.backpressure", {
         itemId: segment.itemId,
-        deliveredAudioMs: segment.deliveredAudioMs,
+        deliveredAudioMs: audioMsForBytes(segment.deliveredBytes),
       });
       targetStdin.once("drain", () => {
         if (speaker !== targetSpeaker || stopping) return;
@@ -483,7 +489,7 @@ const drainPlaybackChunk = (): void => {
         drainPlaybackChunk();
       });
     }
-    segment.deliveredAudioMs += (written / PCM16_BYTES_PER_SECOND) * 1000;
+    segment.deliveredBytes += written;
     lastPlaybackWriteAt = performance.now();
   }
 };
@@ -558,10 +564,10 @@ const enqueuePlayback = (
       chunks: [],
       offset: 0,
       queuedBytes: 0,
-      durationMs: 0,
+      totalBytes: 0,
       firstAudioAt: audioAt,
       lastAudioAt: audioAt,
-      deliveredAudioMs: 0,
+      deliveredBytes: 0,
       done: false,
     };
     playbackSegments.push(segment);
@@ -577,13 +583,13 @@ const enqueuePlayback = (
   segment.lastAudioAt = audioAt;
   segment.chunks.push(Buffer.from(data));
   segment.queuedBytes += data.byteLength;
-  segment.durationMs += (data.byteLength / PCM16_BYTES_PER_SECOND) * 1000;
+  segment.totalBytes += data.byteLength;
   const active = playbackSegments[0];
   if (active) {
     currentOutputItemId = active.itemId;
-    currentOutputDurationMs = active.durationMs;
+    currentOutputDurationMs = audioMsForBytes(active.totalBytes);
     currentOutputFirstAudioAt = active.firstAudioAt;
-    currentDeliveredAudioMs = active.deliveredAudioMs;
+    currentDeliveredAudioMs = audioMsForBytes(active.deliveredBytes);
     currentPlaybackStartedAt = active.playbackStartedAt;
     currentOutputDone = active.done;
   }
@@ -594,8 +600,8 @@ const estimatedPlayedAudioMs = (): number => {
   const segment = playbackSegments[0];
   if (!segment || segment.playbackStartedAt === undefined) return 0;
   return Math.min(
-    segment.durationMs,
-    segment.deliveredAudioMs,
+    audioMsForBytes(segment.totalBytes),
+    audioMsForBytes(segment.deliveredBytes),
     Math.max(0, performance.now() - segment.playbackStartedAt),
   );
 };
@@ -621,7 +627,7 @@ const playbackTimer = setInterval(() => {
       responseId: active.responseId,
       itemId: active.itemId,
       done: active.done,
-      deliveredAudioMs: active.deliveredAudioMs,
+      deliveredAudioMs: audioMsForBytes(active.deliveredBytes),
       waitingResponseId: waiting.responseId,
     });
     playbackSegments.shift();
@@ -639,7 +645,7 @@ const playbackTimer = setInterval(() => {
       responseId: active.responseId,
       itemId: active.itemId,
       queuedBytes: active.queuedBytes,
-      deliveredAudioMs: active.deliveredAudioMs,
+      deliveredAudioMs: audioMsForBytes(active.deliveredBytes),
       lastAudioAgoMs: now - active.lastAudioAt,
       playbackStarted: active.playbackStartedAt !== undefined,
       speakerWritable: speaker?.stdin?.writable === true,
@@ -649,7 +655,8 @@ const playbackTimer = setInterval(() => {
     // Re-anchor pacing to bytes already delivered. This cannot duplicate audio;
     // it only lets queued bytes resume after a stale monotonic clock state.
     if (active.playbackStartedAt !== undefined) {
-      active.playbackStartedAt = now - active.deliveredAudioMs;
+      active.playbackStartedAt =
+        now - audioMsForBytes(active.deliveredBytes);
     }
     drainPlaybackChunk();
   }
@@ -844,7 +851,7 @@ try {
           responseId: segment.responseId,
           itemId: segment.itemId,
           queuedBytes: segment.queuedBytes,
-          deliveredAudioMs: segment.deliveredAudioMs,
+          deliveredAudioMs: audioMsForBytes(segment.deliveredBytes),
           done: segment.done,
         })),
       });
