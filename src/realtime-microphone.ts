@@ -42,6 +42,7 @@ if (!apiKey) throw new Error("Set OPENAI_API_KEY before running npm run realtime
 const callId = `mic-${Date.now()}`;
 const trace = new JsonlCallTrace(callId, process.env.REALTIME_LOG_DIR ?? "logs");
 const showDomainEvents = process.env.REALTIME_SHOW_DOMAIN_EVENTS !== "0";
+const speakerDisabled = process.env.REALTIME_NO_SPEAKER === "1";
 let lockedLanguage: "HI" | "TE" | "EN" | undefined;
 
 const explicitLanguageSelection = (
@@ -252,13 +253,36 @@ console.log("Lead analysis runs asynchronously; WhatsApp and callback actions ar
 
 let stopping = false;
 let speaker: ChildProcess | undefined;
+let speakerRestartTimer: ReturnType<typeof setTimeout> | undefined;
+let speakerRestartAttempts = 0;
+let speakerBackpressured = false;
+
+const scheduleSpeakerRestart = (): void => {
+  if (
+    stopping ||
+    speakerDisabled ||
+    speaker !== undefined ||
+    speakerRestartTimer !== undefined
+  ) return;
+  speakerRestartAttempts += 1;
+  const delayMs = Math.min(100 * (2 ** (speakerRestartAttempts - 1)), 2_000);
+  trace.record("runtime", "speaker.restart_scheduled", {
+    attempt: speakerRestartAttempts,
+    delayMs,
+  });
+  speakerRestartTimer = setTimeout(() => {
+    speakerRestartTimer = undefined;
+    if (stopping || speaker !== undefined) return;
+    speaker = startSpeaker();
+    drainPlaybackChunk();
+  }, delayMs);
+};
 
 const startSpeaker = (): ChildProcess | undefined => {
-  if (process.env.REALTIME_NO_SPEAKER === "1") return undefined;
+  if (speakerDisabled) return undefined;
   const child = spawn("ffplay", [
     "-loglevel", "error",
     "-nodisp",
-    "-autoexit",
     "-fflags", "nobuffer",
     "-flags", "low_delay",
     "-probesize", "32",
@@ -268,27 +292,38 @@ const startSpeaker = (): ChildProcess | undefined => {
     "-ch_layout", "mono",
     "-i", "pipe:0",
   ], { stdio: ["pipe", "ignore", "inherit"] });
+  child.once("spawn", () => {
+    if (speaker !== child) return;
+    trace.record("runtime", "speaker.started", { pid: child.pid });
+  });
   child.once("error", (error) => {
     console.error(`Could not start local speaker playback: ${error.message}`);
+    trace.record("runtime", "speaker.failed", { error: error.message });
   });
-  child.once("close", (code) => {
+  child.stdin?.on("error", (error) => {
+    if (stopping || speaker !== child) return;
+    trace.record("runtime", "speaker.stdin_failed", { error: error.message });
+  });
+  child.once("close", (code, signal) => {
     const wasCurrentSpeaker = speaker === child;
-    if (wasCurrentSpeaker) speaker = undefined;
-    if (!stopping && wasCurrentSpeaker && code !== 0) {
-      console.error(`Local speaker playback exited with code ${code}`);
+    if (!wasCurrentSpeaker) return;
+    speaker = undefined;
+    speakerBackpressured = false;
+    const active = playbackSegments[0];
+    if (active?.playbackStartedAt !== undefined) {
+      // A replacement sink must resume from the bytes already handed off,
+      // rather than trying to catch up to wall-clock time in one burst.
+      active.playbackStartedAt = performance.now() - active.deliveredAudioMs;
+    }
+    trace.record("runtime", "speaker.closed", { code, signal });
+    if (!stopping) {
+      console.error(
+        `Local speaker playback exited (${signal ?? `code ${code}`}); restarting.`,
+      );
+      scheduleSpeakerRestart();
     }
   });
   return child;
-};
-
-const clearSpeakerQueue = (): void => {
-  const previous = speaker;
-  speaker = undefined;
-  previous?.stdin?.destroy();
-  // ffplay owns its own audio queue. Replacing the process is the only reliable
-  // way for this small CLI harness to discard audio already buffered locally.
-  previous?.kill("SIGKILL");
-  if (!stopping) speaker = startSpeaker();
 };
 
 speaker = startSpeaker();
@@ -370,7 +405,7 @@ const drainPlaybackChunk = (): void => {
     }
     return;
   }
-  if (!speaker?.stdin?.writable) return;
+  if (!speaker?.stdin?.writable || speakerBackpressured) return;
   if (
     segment.playbackStartedAt === undefined &&
     segment.queuedBytes < PCM16_BYTES_PER_SECOND * (PLAYBACK_BUFFER_MS / 1000) &&
@@ -416,7 +451,27 @@ const drainPlaybackChunk = (): void => {
     }
   }
   if (written > 0) {
-    speaker.stdin.write(written === output.byteLength ? output : output.subarray(0, written));
+    const targetSpeaker = speaker;
+    const targetStdin = targetSpeaker.stdin;
+    if (!targetStdin) return;
+    const accepted = targetStdin.write(
+      written === output.byteLength ? output : output.subarray(0, written),
+    );
+    // A sink that has accepted real audio is healthy. A later exit should get
+    // an immediate first restart; repeated pre-audio failures retain backoff.
+    speakerRestartAttempts = 0;
+    if (!accepted) {
+      speakerBackpressured = true;
+      trace.record("latency", "speaker.backpressure", {
+        itemId: segment.itemId,
+        deliveredAudioMs: segment.deliveredAudioMs,
+      });
+      targetStdin.once("drain", () => {
+        if (speaker !== targetSpeaker || stopping) return;
+        speakerBackpressured = false;
+        drainPlaybackChunk();
+      });
+    }
     segment.deliveredAudioMs += (written / PCM16_BYTES_PER_SECOND) * 1000;
   }
 };
@@ -433,8 +488,9 @@ let forwardingImmediateDirective = false;
 const playbackAudiblyIdle = (): boolean =>
   !userSpeechActive &&
   (
-    speaker === undefined ||
+    speakerDisabled ||
     (
+      speaker !== undefined &&
       playbackSegments.length === 0 &&
       (
         currentOutputItemId === undefined ||
@@ -525,6 +581,7 @@ const stop = (): Promise<void> => {
   stopPromise = (async () => {
     microphone.kill("SIGINT");
     clearInterval(playbackTimer);
+    if (speakerRestartTimer !== undefined) clearTimeout(speakerRestartTimer);
     clearPacedPlaybackQueue();
     speaker?.stdin?.end();
     await audioChain.catch((error: unknown) => {
@@ -635,9 +692,9 @@ try {
         if (!currentOutputDone || queuedAudioMs > 10) {
           interruptedOutputItemId = currentOutputItemId;
           // Keep the server conversation aligned with what actually reached the
-          // speaker, then discard all locally queued audio immediately.
+          // speaker and discard only the application queue. The session-scoped
+          // ffplay process stays alive, avoiding ALSA teardown/reopen gaps.
           clearPacedPlaybackQueue();
-          clearSpeakerQueue();
           await session.interruptOutput(playedAudioMs);
           console.log(
             `Barge-in: playback cleared; truncated assistant at ${playedAudioMs.toFixed(0)} ms ` +
