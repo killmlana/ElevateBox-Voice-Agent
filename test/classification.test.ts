@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { DeterministicLeadClassifier } from "../src/domain/classifier.ts";
 import { applyLeadUpdate, createLeadState } from "../src/domain/lead-state.ts";
+import { addDeterministicNegativeSignals } from "../src/domain/negative-intent.ts";
 import {
   ScriptedLeadUnderstandingAdapter,
   type ScriptedLeadPatch,
@@ -75,6 +76,28 @@ test("leaves an evidence-free greeting UNKNOWN", async () => {
   const state = await stateFrom({});
   const result = classifier.classify(state);
   assert.equal(result.intent, "UNKNOWN");
+});
+
+test("turns a repeated-call complaint and explicit opt-out into COLD with a negative score", async () => {
+  const state = await stateFrom({
+    negativeSignals: ["repeated_call_complaint", "do_not_contact"],
+  });
+  const result = classifier.classify(state);
+  assert.equal(result.intent, "COLD");
+  assert.ok(result.score < 0);
+  assert.match(result.rationale, /contacted|negative|frustration/i);
+});
+
+test("recognizes the Hindi opt-out phrase used in the microphone trace", () => {
+  const update = addDeterministicNegativeSignals({
+    locations: [],
+    products: [],
+    requirements: [],
+    blockers: [],
+    buyingSignals: [],
+    negativeSignals: [],
+  }, "turn-hindi-opt-out", "हाँ हाँ कॉल मत कीजिएगा");
+  assert.deepEqual(update.negativeSignals.map((item) => item.value), ["do_not_contact"]);
 });
 
 test("subtracts one score point for an individual without an existing business", async () => {

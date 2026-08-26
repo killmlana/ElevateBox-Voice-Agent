@@ -110,6 +110,8 @@ test("configures one direct Realtime WebSocket before declaring the session read
     create_response: true,
     interrupt_response: true,
   });
+  assert.equal(configuredSession.max_output_tokens, 512);
+  assert.deepEqual(configuredSession.reasoning, { effort: "low" });
 
   await session.close();
 });
@@ -339,5 +341,28 @@ test("tells the model that fake action completion is only a local dry run", asyn
   assert.match(String(update.instructions), /LOCAL DRY RUN ONLY/);
   assert.match(String(update.instructions), /no real message/i);
   assert.doesNotMatch(String(update.instructions), /external action has succeeded/i);
+  await session.close();
+});
+
+test("queues an immediate action result until the active Realtime response completes", async () => {
+  const { session, socket } = await openTestSession();
+  socket.receive({ type: "response.created", response: { id: "resp-1" } });
+  await session.sendDirective({
+    directiveId: "directive-immediate",
+    callId: "call-rt-1",
+    intent: "CONFIRM_ACTION_SUCCESS",
+    priority: 2,
+    delivery: "IMMEDIATE_IF_IDLE",
+    data: { kind: "SEND_HOT_DETAILS" },
+  });
+  assert.equal(socket.sent.at(-1)?.type, "session.update", "result must not interrupt an active response");
+
+  socket.receive({ type: "response.done", response: { id: "resp-1", status: "completed" } });
+  const result = socket.sent.at(-1);
+  assert.equal(result?.type, "response.create");
+  const response = result?.response as Record<string, unknown>;
+  assert.deepEqual(response.output_modalities, ["audio"]);
+  assert.match(String(response.instructions), /send ho gaya/i);
+  assert.match(String(response.instructions), /Do not recap/i);
   await session.close();
 });

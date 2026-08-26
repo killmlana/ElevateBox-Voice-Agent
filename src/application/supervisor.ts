@@ -300,7 +300,7 @@ export class Supervisor {
           callId: event.command.callId,
           intent: "CONFIRM_ACTION_SUCCESS",
           priority: 2,
-          delivery: "NEXT_NATURAL_TURN",
+          delivery: "IMMEDIATE_IF_IDLE",
           data: {
             kind: event.command.kind,
             externalId: event.externalId ?? "",
@@ -315,7 +315,7 @@ export class Supervisor {
         callId: event.command.callId,
         intent: "REPORT_ACTION_FAILURE",
         priority: 1,
-        delivery: "NEXT_NATURAL_TURN",
+        delivery: "IMMEDIATE_IF_IDLE",
         data: { kind: event.command.kind, error: event.error ?? "Unknown provider error" },
       });
     }

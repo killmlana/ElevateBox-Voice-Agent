@@ -42,6 +42,8 @@ export interface OpenAIRealtimeRuntimeConfig {
   inputTranscriptionModel?: string | null;
   transcriptionPrompt?: string;
   semanticVadEagerness?: "low" | "medium" | "high" | "auto";
+  maxOutputTokens?: number;
+  reasoningEffort?: "low" | "medium" | "high";
 }
 
 interface ResolvedConfig {
@@ -54,6 +56,8 @@ interface ResolvedConfig {
   inputTranscriptionModel: string | null;
   transcriptionPrompt?: string;
   semanticVadEagerness?: "low" | "medium" | "high" | "auto";
+  maxOutputTokens: number;
+  reasoningEffort: "low" | "medium" | "high";
   languages: readonly SupportedLanguage[];
 }
 
@@ -168,6 +172,24 @@ function directiveInstruction(directive: ConversationDirective): string {
   }
 }
 
+function immediateDirectiveInstruction(directive: ConversationDirective): string {
+  const simulated = directive.data.simulated === true;
+  if (directive.intent === "CONFIRM_ACTION_SUCCESS") {
+    const kind = String(directive.data.kind ?? "action");
+    if (simulated) {
+      return `Speak exactly one brief sentence in the lead's locked language: "Okay, local test mein ${kind} simulate ho gaya; real message nahi gaya." Do not recap, ask a question, or request confirmation.`;
+    }
+    if (kind === "SEND_HOT_DETAILS") {
+      return `Speak exactly one brief sentence in the lead's locked language: "Okay, send ho gaya." Do not recap, ask a question, or request confirmation.`;
+    }
+    if (kind === "BOOK_CALLBACK") {
+      return `Speak exactly one brief sentence in the lead's locked language: "Okay, callback book ho gaya." Do not recap, ask a question, or request confirmation.`;
+    }
+    return `Speak exactly one brief sentence confirming that the ${kind} action succeeded. Do not recap, ask a question, or request confirmation.`;
+  }
+  return "Speak one brief apology saying the requested action did not complete. Do not claim success, recap, or ask another question.";
+}
+
 function transcriptionLanguages(
   languages: readonly SupportedLanguage[] | undefined,
 ): string[] {
@@ -204,6 +226,10 @@ export class OpenAIRealtimeRuntime implements ConversationRuntime {
   ) {
     if (!config.apiKey.trim()) throw new Error("OpenAI API key is required");
     if (!config.instructions.trim()) throw new Error("Realtime instructions are required");
+    const maxOutputTokens = config.maxOutputTokens ?? 512;
+    if (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > 4096) {
+      throw new Error("maxOutputTokens must be an integer between 1 and 4096");
+    }
     this.config = {
       apiKey: config.apiKey,
       instructions: config.instructions,
@@ -224,6 +250,8 @@ export class OpenAIRealtimeRuntime implements ConversationRuntime {
       ...(config.semanticVadEagerness === undefined
         ? {}
         : { semanticVadEagerness: config.semanticVadEagerness }),
+      maxOutputTokens,
+      reasoningEffort: config.reasoningEffort ?? "low",
     };
     this.socketFactory = socketFactory;
     this.capabilities = {
@@ -257,6 +285,10 @@ class OpenAIRealtimeSession implements ConversationSessionPort {
   private configured = false;
   private closed = false;
   private lastAssistantItemId?: string;
+  private responseActive = false;
+  private inputSpeechActive = false;
+  private readonly pendingImmediateDirectives: ConversationDirective[] = [];
+  private readonly sentImmediateDirectiveIds = new Set<string>();
   private preferredLanguage?: SupportedLanguage;
   private inputTurnSequence = 0;
   private readonly inputTurnOrder = new Map<string, number>();
@@ -326,6 +358,7 @@ class OpenAIRealtimeSession implements ConversationSessionPort {
 
   async startConversation(instruction?: string): Promise<void> {
     this.assertUsable();
+    this.responseActive = true;
     this.send({
       event_id: this.nextEventId("response"),
       type: "response.create",
@@ -353,6 +386,13 @@ class OpenAIRealtimeSession implements ConversationSessionPort {
     this.assertUsable();
     if (directive.callId !== this.context.callId) {
       throw new Error("Directive callId does not match the Realtime session");
+    }
+    if (directive.delivery === "IMMEDIATE_IF_IDLE") {
+      if (this.sentImmediateDirectiveIds.has(directive.directiveId)) return;
+      this.sentImmediateDirectiveIds.add(directive.directiveId);
+      this.pendingImmediateDirectives.push(directive);
+      this.flushImmediateDirective();
+      return;
     }
     this.send({
       event_id: this.nextEventId("directive"),
@@ -410,6 +450,8 @@ class OpenAIRealtimeSession implements ConversationSessionPort {
         type: "realtime",
         model: this.config.model,
         output_modalities: ["audio"],
+        max_output_tokens: this.config.maxOutputTokens,
+        reasoning: { effort: this.config.reasoningEffort },
         audio: {
           input: {
             format: { type: "audio/pcm", rate: 24000 },
@@ -479,6 +521,7 @@ class OpenAIRealtimeSession implements ConversationSessionPort {
     }
 
     if (type === "response.output_item.added") {
+      this.responseActive = true;
       const item = asRecord(event.item);
       if (item && typeof item.id === "string") this.lastAssistantItemId = item.id;
       this.eventQueue.push({ type, payload: event });
@@ -592,12 +635,27 @@ class OpenAIRealtimeSession implements ConversationSessionPort {
     }
 
     if (type === "input_audio_buffer.speech_started") {
+      this.inputSpeechActive = true;
       this.eventQueue.push({ type: "user.speech_started", payload: event });
       return;
     }
 
     if (type === "input_audio_buffer.speech_stopped") {
+      this.inputSpeechActive = false;
       this.eventQueue.push({ type: "user.speech_stopped", payload: event });
+      return;
+    }
+
+    if (type === "response.created") {
+      this.responseActive = true;
+      this.eventQueue.push({ type, payload: event });
+      return;
+    }
+
+    if (type === "response.done") {
+      this.responseActive = false;
+      this.eventQueue.push({ type, payload: event });
+      this.flushImmediateDirective();
       return;
     }
 
@@ -667,5 +725,26 @@ class OpenAIRealtimeSession implements ConversationSessionPort {
 
   private send(event: Record<string, unknown>): void {
     this.socket.send(JSON.stringify(event));
+  }
+
+  private flushImmediateDirective(): void {
+    if (
+      this.closed ||
+      this.responseActive ||
+      this.inputSpeechActive ||
+      this.pendingImmediateDirectives.length === 0
+    ) return;
+    const directive = this.pendingImmediateDirectives.shift();
+    if (!directive) return;
+    this.responseActive = true;
+    this.send({
+      event_id: this.nextEventId("directive-response"),
+      type: "response.create",
+      response: {
+        output_modalities: ["audio"],
+        instructions: immediateDirectiveInstruction(directive),
+        max_output_tokens: 96,
+      },
+    });
   }
 }

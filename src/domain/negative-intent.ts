@@ -57,7 +57,7 @@ export function addDeterministicNegativeSignals(
   turnText: string,
 ): ExtractedLeadUpdate {
   const merged = new Map<NegativeLeadSignal, Evidence<NegativeLeadSignal>>(
-    update.negativeSignals.map((item) => [item.value, item]),
+    (update.negativeSignals ?? []).map((item) => [item.value, item]),
   );
   for (const signal of detectNegativeLeadSignals(turnText)) {
     if (merged.has(signal)) continue;

@@ -4,6 +4,7 @@ import { LiveCallController } from "./application/live-call-controller.ts";
 import { LiveCallLatencyRecorder } from "./application/live-call-latency.ts";
 import { PrototypeSystem } from "./application/prototype-system.ts";
 import type {
+  ConversationDirective,
   ConversationSessionPort,
   LeadState,
   NormalizedEvent,
@@ -105,6 +106,15 @@ if (!["low", "medium", "high", "auto"].includes(semanticVadEagerness)) {
     "OPENAI_SEMANTIC_VAD_EAGERNESS must be low, medium, high, or auto",
   );
 }
+const realtimeReasoningEffort = process.env.OPENAI_REALTIME_REASONING_EFFORT ?? "low";
+if (!['low', 'medium', 'high'].includes(realtimeReasoningEffort)) {
+  throw new Error(
+    "OPENAI_REALTIME_REASONING_EFFORT must be low, medium, or high",
+  );
+}
+const realtimeMaxOutputTokens = Number(
+  process.env.OPENAI_REALTIME_MAX_OUTPUT_TOKENS ?? 512,
+);
 const runtime = new OpenAIRealtimeRuntime(
   {
     apiKey,
@@ -121,6 +131,8 @@ const runtime = new OpenAIRealtimeRuntime(
       "ElevateBox, e-commerce website development, catalogue, Razorpay, COD, inventory, WhatsApp, budget, products, features, timeline, callback; expect Hindi, Telugu, English, and code-switching.",
     handshakeTimeoutMs: Number(process.env.OPENAI_REALTIME_HANDSHAKE_TIMEOUT_MS ?? 10_000),
     semanticVadEagerness: semanticVadEagerness as "low" | "medium" | "high" | "auto",
+    maxOutputTokens: realtimeMaxOutputTokens,
+    reasoningEffort: realtimeReasoningEffort as "low" | "medium" | "high",
     languages: ["EN", "HI", "TE", "MIXED"],
   },
   new NodeRealtimeSocketFactory(),
@@ -128,9 +140,9 @@ const runtime = new OpenAIRealtimeRuntime(
 
 const messaging = new FakeMessagingAdapter();
 const scheduler = new FakeSchedulerAdapter();
-const leadModel = process.env.OPENAI_LEAD_MODEL ?? "gpt-5.3-chat-latest";
-const leadTimeoutMs = Number(process.env.OPENAI_LEAD_TIMEOUT_MS ?? 8_000);
-const leadMaxOutputTokens = Number(process.env.OPENAI_LEAD_MAX_OUTPUT_TOKENS ?? 800);
+const leadModel = process.env.OPENAI_LEAD_MODEL ?? "gpt-5.4-nano";
+const leadTimeoutMs = Number(process.env.OPENAI_LEAD_TIMEOUT_MS ?? 6_000);
+const leadMaxOutputTokens = Number(process.env.OPENAI_LEAD_MAX_OUTPUT_TOKENS ?? 500);
 const leadConcurrency = Number(process.env.OPENAI_LEAD_CONCURRENCY ?? 4);
 const recordLeadRequestMetrics = (metrics: LeadRequestMetrics): void => {
   trace.record("runtime", "lead.analysis.provider_request", { ...metrics });
@@ -180,6 +192,8 @@ const [session, workflow] = await Promise.all([
   }),
   system.startCall(callId),
 ]);
+let forwardRealtimeDirective: (directive: ConversationDirective) => Promise<void> =
+  (directive) => session.sendDirective(directive);
 const readyAt = performance.now();
 const workflowLatency = new LiveCallLatencyRecorder();
 workflowLatency.recordPrewarm(readyAt - startedAt);
@@ -192,18 +206,22 @@ const workflowSession: ConversationSessionPort = {
   close: () => session.close(),
   async sendDirective(directive) {
     if (directive.intent === "CONFIRM_ACTION_SUCCESS") {
-      trace.record("runtime", "dry_run.confirmation_suppressed", {
+      trace.record("runtime", "dry_run.action_simulated", {
         directive,
         reason: "Local mic actions use fake adapters and did not contact an external provider.",
       });
-      await session.sendDirective({
+      const simulatedDirective = {
         ...directive,
         data: { ...directive.data, simulated: true },
+      };
+      trace.record("runtime", "conversation.directive.forwarded", {
+        directive: simulatedDirective,
       });
+      await forwardRealtimeDirective(simulatedDirective);
       return;
     }
     trace.record("runtime", "conversation.directive.forwarded", { directive });
-    await session.sendDirective(directive);
+    await forwardRealtimeDirective(directive);
   },
 };
 const controller = new LiveCallController(
@@ -220,6 +238,8 @@ trace.record("runtime", "session.ready", {
   leadConcurrency,
   playbackBufferMs: PLAYBACK_BUFFER_MS,
   semanticVadEagerness,
+  realtimeReasoningEffort,
+  realtimeMaxOutputTokens,
   outbound: true,
   dryRunActions: true,
 });
@@ -295,6 +315,7 @@ let currentOutputFirstAudioAt: number | undefined;
 let currentDeliveredAudioMs = 0;
 let currentPlaybackStartedAt: number | undefined;
 let currentOutputDone = false;
+let userSpeechActive = false;
 let interruptedOutputItemId: string | undefined;
 const playbackQueue: Buffer[] = [];
 let playbackQueueOffset = 0;
@@ -324,7 +345,10 @@ const drainPlaybackChunk = (): void => {
         currentPlaybackStartedAt === undefined ||
         performance.now() - currentPlaybackStartedAt >= currentDeliveredAudioMs
       )
-    ) resetOutputClock();
+    ) {
+      resetOutputClock();
+      flushPendingImmediateDirectives();
+    }
     return;
   }
   if (!speaker?.stdin?.writable) return;
@@ -378,6 +402,61 @@ const drainPlaybackChunk = (): void => {
     currentDeliveredAudioMs += (written / PCM16_BYTES_PER_SECOND) * 1000;
   }
 };
+
+interface PendingImmediateDirective {
+  directive: ConversationDirective;
+  resolve(): void;
+  reject(error: unknown): void;
+}
+
+const pendingImmediateDirectives: PendingImmediateDirective[] = [];
+let forwardingImmediateDirective = false;
+
+const playbackAudiblyIdle = (): boolean =>
+  !userSpeechActive &&
+  (
+    speaker === undefined ||
+    (
+      playbackQueuedBytes === 0 &&
+      (
+        currentOutputItemId === undefined ||
+        (
+          currentOutputDone &&
+          currentPlaybackStartedAt !== undefined &&
+          performance.now() - currentPlaybackStartedAt >= currentDeliveredAudioMs
+        )
+      )
+    )
+  );
+
+function flushPendingImmediateDirectives(): void {
+  if (
+    forwardingImmediateDirective ||
+    !playbackAudiblyIdle() ||
+    pendingImmediateDirectives.length === 0
+  ) return;
+  const pending = pendingImmediateDirectives.shift();
+  if (!pending) return;
+  forwardingImmediateDirective = true;
+  void session.sendDirective(pending.directive).then(
+    () => pending.resolve(),
+    (error: unknown) => pending.reject(error),
+  ).finally(() => {
+    forwardingImmediateDirective = false;
+    flushPendingImmediateDirectives();
+  });
+}
+
+const queueImmediateDirective = (directive: ConversationDirective): Promise<void> =>
+  new Promise<void>((resolve, reject) => {
+    pendingImmediateDirectives.push({ directive, resolve, reject });
+    flushPendingImmediateDirectives();
+  });
+
+forwardRealtimeDirective = (directive) =>
+  directive.delivery === "IMMEDIATE_IF_IDLE"
+    ? queueImmediateDirective(directive)
+    : session.sendDirective(directive);
 
 const enqueuePlayback = (data: Uint8Array): void => {
   playbackQueue.push(Buffer.from(data));
@@ -511,6 +590,7 @@ try {
         estimatedSpeechEndAt = undefined;
       }
     } else if (event.type === "user.speech_started") {
+      userSpeechActive = true;
       const speechStartedEventAt = performance.now();
       if (
         currentOutputItemId !== undefined &&
@@ -563,6 +643,7 @@ try {
       currentOutputDone = true;
       drainPlaybackChunk();
     } else if (event.type === "user.speech_stopped") {
+      userSpeechActive = false;
       speechStoppedEventAt = performance.now();
       const audioEndMs = event.payload.audio_end_ms;
       trace.record("runtime", "user.speech_stopped", {
