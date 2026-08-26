@@ -19,6 +19,23 @@ export class DeterministicLeadClassifier {
     const negativeSignals = new Set(
       state.negativeSignals.map((item) => item.value),
     );
+    const hasConcreteNeed =
+      signals.has("clear_need") ||
+      state.requirements.length > 0;
+    const hasTimingBarrier =
+      blockers.has("timing_barrier") ||
+      blockers.has("timing_or_interest_barrier");
+    const isJustLooking =
+      blockers.has("just_looking") ||
+      blockers.has("no_clear_need") ||
+      (
+        !hasConcreteNeed &&
+        signals.has("pricing_interest") &&
+        state.budgetInr === undefined &&
+        state.timeline === undefined &&
+        !signals.has("start_soon")
+      ) ||
+      (hasTimingBarrier && !hasConcreteNeed);
     const turns = evidenceTurns(state);
     const scoreBreakdown: IntentClassification["scoreBreakdown"] = [];
     const add = (factor: string, delta: number): void => {
@@ -35,7 +52,7 @@ export class DeterministicLeadClassifier {
     if (state.customerType.value === "INDIVIDUAL") {
       add("no existing business", -1);
     }
-    if (blockers.has("timing_or_interest_barrier")) {
+    if (hasTimingBarrier) {
       add("not ready or no current interest", -2);
     }
     if (negativeSignals.has("hostile_or_abusive")) {
@@ -80,34 +97,44 @@ export class DeterministicLeadClassifier {
       };
     }
 
-    if (
-      blockers.has("timing_or_interest_barrier") &&
-      !state.budgetInr &&
-      !signals.has("send_details") &&
-      !signals.has("start_soon")
-    ) {
+    if (isJustLooking) {
       return {
         intent: "COLD",
         score,
         scoreBreakdown,
         confidence: 0.9,
         evidenceTurnIds: turns,
-        rationale: "The lead is only exploring or explicitly not ready, with no countervailing budget or urgency evidence.",
+        rationale: "The lead is only exploring and has not expressed a concrete need or buying commitment.",
       };
     }
 
-    if (state.decisionMaker.value === "OTHER" || blockers.has("budget_barrier")) {
+    if (
+      hasConcreteNeed &&
+      (
+        state.decisionMaker.value === "OTHER" ||
+        blockers.has("budget_barrier") ||
+        hasTimingBarrier ||
+        blockers.has("other_decision_maker")
+      )
+    ) {
       return {
         intent: "WARM",
         score,
         scoreBreakdown,
         confidence: 0.86,
         evidenceTurnIds: turns,
-        rationale: "There is a real need, but budget or another decision-maker is a material blocker.",
+        rationale: "There is a real need, but budget, timing, or another decision-maker is a material blocker.",
       };
     }
 
-    if (score >= 6 && (state.budgetInr || state.timeline)) {
+    const asksPriceAndTimeline =
+      hasConcreteNeed &&
+      signals.has("pricing_interest") &&
+      (state.timeline !== undefined || signals.has("start_soon"));
+    if (
+      asksPriceAndTimeline ||
+      (score >= 6 && hasConcreteNeed && (state.budgetInr || state.timeline))
+    ) {
       return {
         intent: "HOT",
         score,
@@ -118,7 +145,10 @@ export class DeterministicLeadClassifier {
       };
     }
 
-    if (score >= 1 || (score >= 0 && signals.has("clear_need"))) {
+    if (
+      hasConcreteNeed &&
+      (score >= 1 || (score >= 0 && signals.has("clear_need")))
+    ) {
       return {
         intent: "WARM",
         score,

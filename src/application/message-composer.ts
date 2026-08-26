@@ -4,6 +4,7 @@ export interface CandidateContext {
   candidatePhone: string;
   resumeUrl: string;
   architectureUrl: string;
+  brochureUrl?: string;
 }
 
 function money(value: number): string {
@@ -66,7 +67,23 @@ export class MessageComposer {
         "I’ll keep the next step focused on these requirements.",
         `You can reach me at ${this.candidate.candidatePhone}.`,
       ].join(" "),
-      attachments: [],
+      attachments: [this.candidate.resumeUrl, this.candidate.architectureUrl].filter(Boolean),
+      idempotencyKey,
+    };
+  }
+
+  coldBrochure(state: LeadState, idempotencyKey: string): OutgoingMessage {
+    const context = state.businessDescription?.value ?? state.products[0]?.value;
+    return {
+      to: this.leadPhone,
+      body: [
+        "Here’s a short ElevateBox e-commerce website brochure for whenever it becomes relevant.",
+        context ? `I noted your interest around ${context}.` : "There’s no pressure to decide now.",
+        `You can reach me at ${this.candidate.candidatePhone}.`,
+      ].join(" "),
+      attachments: [
+        this.candidate.brochureUrl ?? this.candidate.architectureUrl,
+      ].filter(Boolean),
       idempotencyKey,
     };
   }

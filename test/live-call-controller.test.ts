@@ -213,7 +213,8 @@ test("runs an ordered transcript-to-supervisor-to-directive call lifecycle", asy
   }));
   await live.idle();
   assert.equal(session.closed, true);
-  assert.equal(messaging.deliveries.length, 2, "final follow-up runs after stop");
+  assert.equal(messaging.deliveries.length, 1, "HOT WhatsApp is not duplicated after stop");
+  assert.deepEqual(messaging.deliveries[0]?.attachments, ["resume.pdf", "architecture.png"]);
   assert.ok(
     system.eventsFor("integrated-call").some((event) => event.type === "call.ended"),
   );

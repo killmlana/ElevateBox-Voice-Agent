@@ -93,6 +93,7 @@ export function createLeadState(callId: string, now: string): LeadState {
     },
     actions: {
       hotWhatsappSent: false,
+      coldBrochureSent: false,
       callbackBooked: false,
       finalFollowupSent: false,
     },
@@ -137,6 +138,7 @@ export function markActionSucceeded(
   const actions = { ...state.actions };
   const callback = { ...state.callback };
   if (kind === "SEND_HOT_DETAILS") actions.hotWhatsappSent = true;
+  if (kind === "SEND_COLD_BROCHURE") actions.coldBrochureSent = true;
   if (kind === "BOOK_CALLBACK") {
     actions.callbackBooked = true;
     callback.booked = true;

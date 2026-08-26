@@ -17,11 +17,13 @@ export type CallState =
 
 export type ActionKind =
   | "SEND_HOT_DETAILS"
+  | "SEND_COLD_BROCHURE"
   | "BOOK_CALLBACK"
   | "SEND_FINAL_FOLLOWUP";
 
 export type DirectiveIntent =
   | "ASK_SEND_PERMISSION"
+  | "ASK_CALLBACK_TIME"
   | "ASK_CALLBACK_CLARIFICATION"
   | "INTENT_UPDATED"
   | "CONFIRM_ACTION_SUCCESS"
@@ -124,6 +126,7 @@ export interface LeadState {
   callback: CallbackState;
   actions: {
     hotWhatsappSent: boolean;
+    coldBrochureSent: boolean;
     callbackBooked: boolean;
     finalFollowupSent: boolean;
   };

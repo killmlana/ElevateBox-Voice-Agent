@@ -186,6 +186,7 @@ const system = new PrototypeSystem(
       resumeUrl: process.env.ELEVATEBOX_RESUME_PATH ?? "resume.pdf",
       architectureUrl:
         process.env.ELEVATEBOX_BUILD_IMAGE_PATH ?? "architecture.png",
+      brochureUrl: process.env.ELEVATEBOX_BROCHURE_PATH ?? "brochure.pdf",
     },
   },
   new SystemClock(),

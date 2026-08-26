@@ -110,7 +110,9 @@ export class ActionManager {
     if (!state) throw new Error("Message command is missing LeadState");
     const message = command.kind === "SEND_HOT_DETAILS"
       ? this.composer.hotDetails(state, command.idempotencyKey)
-      : this.composer.finalFollowup(state, command.idempotencyKey);
+      : command.kind === "SEND_COLD_BROCHURE"
+        ? this.composer.coldBrochure(state, command.idempotencyKey)
+        : this.composer.finalFollowup(state, command.idempotencyKey);
     const result = await this.messaging.send(message);
     return result.externalId;
   }

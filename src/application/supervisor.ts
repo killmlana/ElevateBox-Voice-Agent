@@ -340,16 +340,37 @@ export class Supervisor {
       payload: { state: context.state },
     });
 
-    if (
-      context.state.actions.finalFollowupSent ||
-      context.requestedActionKinds.has("SEND_FINAL_FOLLOWUP")
-    ) return [];
+    if (context.state.negativeSignals.length > 0) return [];
+
+    let kind: ActionCommand["kind"] | undefined;
+    if (context.state.intent === "HOT") {
+      const detailsWereRequested = context.state.buyingSignals.some(
+        (signal) => signal.value === "send_details",
+      );
+      if (
+        detailsWereRequested &&
+        !context.state.actions.hotWhatsappSent &&
+        !context.requestedActionKinds.has("SEND_HOT_DETAILS")
+      ) kind = "SEND_HOT_DETAILS";
+    } else if (context.state.intent === "WARM") {
+      if (
+        !context.state.actions.finalFollowupSent &&
+        !context.requestedActionKinds.has("SEND_FINAL_FOLLOWUP")
+      ) kind = "SEND_FINAL_FOLLOWUP";
+    } else if (context.state.intent === "COLD") {
+      if (
+        !context.state.actions.coldBrochureSent &&
+        !context.requestedActionKinds.has("SEND_COLD_BROCHURE")
+      ) kind = "SEND_COLD_BROCHURE";
+    }
+
+    if (!kind) return [];
 
     const command: ActionCommand = {
-      commandId: `${callId}:send-final-followup`,
-      idempotencyKey: `${callId}:SEND_FINAL_FOLLOWUP:v1`,
+      commandId: `${callId}:${kind.toLowerCase().replaceAll("_", "-")}`,
+      idempotencyKey: `${callId}:${kind}:v1`,
       callId,
-      kind: "SEND_FINAL_FOLLOWUP",
+      kind,
       payload: { state: context.state },
       maxAttempts: 2,
     };

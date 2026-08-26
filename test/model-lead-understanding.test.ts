@@ -58,6 +58,8 @@ test("accepts arbitrary products and requirements without a catalogue", async ()
 
   assert.match(observedInstruction, /compact/i);
   assert.match(observedInstruction, /context only/i);
+  assert.match(observedInstruction, /just_looking/i);
+  assert.match(observedInstruction, /timing_barrier/i);
   assert.equal(observedPrecedingAssistantText, "What kind of business do you run?");
   assert.equal(
     patch.businessDescription?.value,

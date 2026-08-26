@@ -19,6 +19,9 @@ test("defines an outbound ElevateBox opening and adaptive discovery flow", () =>
   assert.match(ELEVATEBOX_OUTBOUND_PROMPT, /do not have a business/i);
   assert.match(ELEVATEBOX_OUTBOUND_PROMPT, /budget range in INR/i);
   assert.match(ELEVATEBOX_OUTBOUND_PROMPT, /timeline/i);
+  assert.match(ELEVATEBOX_OUTBOUND_PROMPT, /budget, timing, or decision-maker barrier/i);
+  assert.match(ELEVATEBOX_OUTBOUND_PROMPT, /only looking and has no clear need or budget/i);
+  assert.match(ELEVATEBOX_OUTBOUND_PROMPT, /do not offer or send anything/i);
   assert.match(ELEVATEBOX_OUTBOUND_PROMPT, /Never say HOT, WARM, COLD/i);
   assert.match(ELEVATEBOX_OUTBOUND_START, /Begin the outbound call now/i);
   assert.doesNotMatch(ELEVATEBOX_OUTBOUND_START, /AI-assisted/i);

@@ -158,6 +158,8 @@ function directiveInstruction(directive: ConversationDirective): string {
   switch (directive.intent) {
     case "ASK_SEND_PERMISSION":
       return `At the next natural pause, ask permission before sending details. Context: ${details}`;
+    case "ASK_CALLBACK_TIME":
+      return `A real need has a readiness barrier. Briefly acknowledge the specific barrier, then ask one concise question for the lead's preferred callback day and time. Do not continue broad discovery first. Context: ${details}`;
     case "ASK_CALLBACK_CLARIFICATION":
       return `Ask one concise question to resolve the callback date or time. Context: ${details}`;
     case "INTENT_UPDATED":
@@ -177,6 +179,9 @@ function immediateDirectiveInstruction(directive: ConversationDirective): string
   if (directive.intent === "CONFIRM_ACTION_SUCCESS") {
     const kind = String(directive.data.kind ?? "action");
     if (simulated) {
+      if (kind === "SEND_COLD_BROCHURE") {
+        return `Speak exactly one brief sentence in the lead's locked language: "Okay, local test mein brochure send simulate hua; real message nahi gaya. Thank you." Do not ask another question.`;
+      }
       return `Speak exactly one brief sentence in the lead's locked language: "Okay, local test mein ${kind} simulate ho gaya; real message nahi gaya." Do not recap, ask a question, or request confirmation.`;
     }
     if (kind === "SEND_HOT_DETAILS") {
@@ -184,6 +189,9 @@ function immediateDirectiveInstruction(directive: ConversationDirective): string
     }
     if (kind === "BOOK_CALLBACK") {
       return `Speak exactly one brief sentence in the lead's locked language: "Okay, callback book ho gaya." Do not recap, ask a question, or request confirmation.`;
+    }
+    if (kind === "SEND_COLD_BROCHURE") {
+      return `Speak exactly one brief sentence in the lead's locked language: "Okay, brochure send ho gaya. Thank you, have a good day." Do not ask another question or continue discovery.`;
     }
     return `Speak exactly one brief sentence confirming that the ${kind} action succeeded. Do not recap, ask a question, or request confirmation.`;
   }

@@ -32,6 +32,7 @@ function buildSystem(
         candidatePhone: "+919999999999",
         resumeUrl: "resume.pdf",
         architectureUrl: "architecture.png",
+        brochureUrl: "brochure.pdf",
       },
     },
     clock,
@@ -42,7 +43,7 @@ function buildSystem(
   return { system, messaging, scheduler };
 }
 
-test("fires one high-intent WhatsApp while active, books callback, and follows up after end", async () => {
+test("fires one high-intent WhatsApp while active without duplicating it after end", async () => {
   const { system, messaging, scheduler } = buildSystem({
     "turn-1": {
       language: "EN",
@@ -109,8 +110,8 @@ test("fires one high-intent WhatsApp while active, books callback, and follows u
   call.end();
   await call.idle();
   assert.equal(call.state().callState, "ENDED");
-  assert.equal(messaging.deliveries.length, 2);
-  assert.deepEqual(messaging.deliveries[1]?.attachments, ["resume.pdf", "architecture.png"]);
+  assert.equal(messaging.deliveries.length, 1);
+  assert.deepEqual(messaging.deliveries[0]?.attachments, ["resume.pdf", "architecture.png"]);
 
   const persistedEvents = system.eventsFor("call-1");
   assert.deepEqual(replayLeadState("call-1", persistedEvents), call.state());
@@ -121,7 +122,116 @@ test("fires one high-intent WhatsApp while active, books callback, and follows u
     eventTypes.filter((type) => type === "lead.classification.evaluated").length,
     4,
   );
-  assert.equal(eventTypes.filter((type) => type === "action.succeeded").length, 3);
+  assert.equal(eventTypes.filter((type) => type === "action.succeeded").length, 2);
+});
+
+test("turns a HOT price-and-timeline enquiry into one confident WhatsApp handoff", async () => {
+  const { system, messaging } = buildSystem({
+    "hot-offer-1": {
+      businessDescription: "a specialty coffee subscription",
+      timeline: "launch next month",
+      buyingSignals: ["clear_need", "pricing_interest"],
+    },
+    "hot-offer-2": { buyingSignals: ["send_details"] },
+  });
+  const call = await system.startCall("call-hot-offer");
+
+  await call.submitStableTurnAndWait({
+    turnId: "hot-offer-1",
+    text: "We want the site next month. What would it cost?",
+    occurredAt: "2026-08-26T10:00:01.000Z",
+  });
+  assert.equal(call.state().intent, "HOT");
+  assert.equal(messaging.deliveries.length, 0);
+  assert.ok(call.takeDirectives().some((item) => item.intent === "ASK_SEND_PERMISSION"));
+
+  await call.submitStableTurnAndWait({
+    turnId: "hot-offer-2",
+    text: "Yes, this number is fine for WhatsApp.",
+    occurredAt: "2026-08-26T10:00:02.000Z",
+  });
+  await call.idle();
+  assert.equal(messaging.deliveries.length, 1);
+  assert.equal(call.state().actions.hotWhatsappSent, true);
+});
+
+test("captures a WARM timing barrier, requests a callback time, and books it", async () => {
+  const { system, messaging, scheduler } = buildSystem({
+    "warm-1": {
+      businessDescription: "an organic grocery delivery business",
+      buyingSignals: ["clear_need"],
+      blockers: ["timing_barrier"],
+    },
+    "warm-2": { callbackPhrase: "tomorrow morning" },
+  });
+  const call = await system.startCall("call-warm");
+
+  await call.submitStableTurnAndWait({
+    turnId: "warm-1",
+    text: "We need the store, but this month is too busy.",
+    occurredAt: "2026-08-26T10:00:01.000Z",
+  });
+  assert.equal(call.state().intent, "WARM");
+  assert.ok(call.takeDirectives().some((item) => item.intent === "ASK_CALLBACK_TIME"));
+  assert.equal(messaging.deliveries.length, 0);
+
+  await call.submitStableTurnAndWait({
+    turnId: "warm-2",
+    text: "Call me tomorrow morning.",
+    occurredAt: "2026-08-26T10:00:02.000Z",
+  });
+  await call.idle();
+  assert.equal(scheduler.bookings.length, 1);
+
+  await call.endAndWait();
+  assert.equal(messaging.deliveries.length, 1);
+  assert.match(messaging.deliveries[0]?.body ?? "", /Callback requested/i);
+});
+
+test("sends one brochure for a COLD just-looking lead and moves on", async () => {
+  const { system, messaging } = buildSystem({
+    "cold-1": { blockers: ["just_looking"] },
+  });
+  const call = await system.startCall("call-cold");
+
+  await call.submitStableTurnAndWait({
+    turnId: "cold-1",
+    text: "I am only browsing, I do not have a plan or budget yet.",
+    occurredAt: "2026-08-26T10:00:01.000Z",
+  });
+  await call.idle();
+  assert.equal(call.state().intent, "COLD");
+  assert.equal(call.state().actions.coldBrochureSent, true);
+  assert.equal(messaging.deliveries.length, 1);
+  assert.deepEqual(messaging.deliveries[0]?.attachments, ["brochure.pdf"]);
+  assert.ok(
+    system.eventsFor("call-cold").some((event) =>
+      event.type === "action.requested" &&
+      (event.payload as { kind?: string }).kind === "SEND_COLD_BROCHURE"
+    ),
+  );
+
+  await call.endAndWait();
+  assert.equal(messaging.deliveries.length, 1, "call end must not duplicate the brochure");
+});
+
+test("suppresses every follow-up when a COLD lead opts out", async () => {
+  const { system, messaging } = buildSystem({
+    "opt-out-1": { negativeSignals: ["do_not_contact"] },
+  });
+  const call = await system.startCall("call-opt-out");
+
+  await call.submitStableTurnAndWait({
+    turnId: "opt-out-1",
+    text: "Do not contact me again.",
+    occurredAt: "2026-08-26T10:00:01.000Z",
+  });
+  await call.idle();
+  assert.equal(call.state().intent, "COLD");
+  assert.equal(messaging.deliveries.length, 0);
+
+  await call.endAndWait();
+  assert.equal(messaging.deliveries.length, 0);
 });
 
 test("retries a transient provider failure without duplicating delivery", async () => {

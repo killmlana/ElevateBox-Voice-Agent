@@ -326,6 +326,24 @@ test("applies supervisor directives through session instructions without blockin
   await session.close();
 });
 
+test("turns a WARM barrier directive into one callback-time question", async () => {
+  const { session, socket } = await openTestSession();
+  await session.sendDirective({
+    directiveId: "directive-warm-callback",
+    callId: "call-rt-1",
+    intent: "ASK_CALLBACK_TIME",
+    priority: 1,
+    delivery: "NEXT_NATURAL_TURN",
+    data: { blockers: ["timing_barrier"] },
+  });
+
+  const update = socket.sent.at(-1)?.session as Record<string, unknown>;
+  assert.match(String(update.instructions), /readiness barrier/i);
+  assert.match(String(update.instructions), /callback day and time/i);
+  assert.match(String(update.instructions), /timing_barrier/i);
+  await session.close();
+});
+
 test("tells the model that fake action completion is only a local dry run", async () => {
   const { session, socket } = await openTestSession();
   await session.sendDirective({
@@ -364,6 +382,24 @@ test("queues an immediate action result until the active Realtime response compl
   assert.deepEqual(response.output_modalities, ["audio"]);
   assert.match(String(response.instructions), /send ho gaya/i);
   assert.match(String(response.instructions), /Do not recap/i);
+  await session.close();
+});
+
+test("confirms a COLD brochure briefly and closes without another question", async () => {
+  const { session, socket } = await openTestSession();
+  await session.sendDirective({
+    directiveId: "directive-cold-brochure",
+    callId: "call-rt-1",
+    intent: "CONFIRM_ACTION_SUCCESS",
+    priority: 2,
+    delivery: "IMMEDIATE_IF_IDLE",
+    data: { kind: "SEND_COLD_BROCHURE" },
+  });
+
+  const response = socket.sent.at(-1)?.response as Record<string, unknown>;
+  assert.match(String(response.instructions), /brochure send ho gaya/i);
+  assert.match(String(response.instructions), /good day/i);
+  assert.match(String(response.instructions), /Do not ask another question/i);
   await session.close();
 });
 

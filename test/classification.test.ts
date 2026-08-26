@@ -66,8 +66,35 @@ test("keeps a real lead with another decision-maker WARM", async () => {
   assert.match(result.rationale, /decision-maker/i);
 });
 
+test("keeps a concrete need with a timing barrier WARM", async () => {
+  const state = await stateFrom({
+    businessDescription: "a regional organic grocery store",
+    buyingSignals: ["clear_need"],
+    blockers: ["timing_barrier"],
+  });
+  const result = classifier.classify(state);
+  assert.equal(result.intent, "WARM");
+  assert.match(result.rationale, /timing/i);
+});
+
+test("classifies a concrete price-and-timeline enquiry as HOT without a stated budget", async () => {
+  const state = await stateFrom({
+    businessDescription: "a handmade stationery shop",
+    timeline: "launch next month",
+    buyingSignals: ["clear_need", "pricing_interest"],
+  });
+  const result = classifier.classify(state);
+  assert.equal(result.intent, "HOT");
+});
+
 test("classifies a just-looking lead with no budget as COLD", async () => {
-  const state = await stateFrom({ blockers: ["timing_or_interest_barrier"] });
+  const state = await stateFrom({ blockers: ["just_looking"] });
+  const result = classifier.classify(state);
+  assert.equal(result.intent, "COLD");
+});
+
+test("keeps price curiosity without a concrete need COLD", async () => {
+  const state = await stateFrom({ buyingSignals: ["pricing_interest"] });
   const result = classifier.classify(state);
   assert.equal(result.intent, "COLD");
 });

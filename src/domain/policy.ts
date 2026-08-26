@@ -22,6 +22,10 @@ function hasSignal(update: ExtractedLeadUpdate, value: string): boolean {
   return update.buyingSignals.some((signal) => signal.value === value);
 }
 
+function stateHasSignal(state: LeadState, value: string): boolean {
+  return state.buyingSignals.some((signal) => signal.value === value);
+}
+
 function directive(
   state: LeadState,
   intent: ConversationDirective["intent"],
@@ -58,7 +62,7 @@ export class LeadPolicy {
     const hotMessageRequested = requestedActionKinds.has("SEND_HOT_DETAILS");
     if (
       current.intent === "HOT" &&
-      hasSignal(update, "send_details") &&
+      (hasSignal(update, "send_details") || stateHasSignal(current, "send_details")) &&
       !current.actions.hotWhatsappSent &&
       !hotMessageRequested
     ) {
@@ -81,6 +85,43 @@ export class LeadPolicy {
           reason: "High intent detected without an explicit request to send details.",
         }, 1),
       );
+    }
+
+    const hasWarmBarrier =
+      current.blockers.length > 0 || current.decisionMaker.value === "OTHER";
+    const latestTurnIntroducedBarrier =
+      update.blockers.length > 0 || update.decisionMaker?.value === "OTHER";
+    if (
+      current.intent === "WARM" &&
+      hasWarmBarrier &&
+      !current.callback.requested &&
+      !current.callback.booked &&
+      (previous.intent !== "WARM" || latestTurnIntroducedBarrier)
+    ) {
+      directives.push(
+        directive(current, "ASK_CALLBACK_TIME", current.updatedAt, {
+          blockers: current.blockers.map((item) => item.value),
+          decisionMaker: current.decisionMaker.value,
+          reason: "A real need exists, but a readiness barrier should be revisited later.",
+        }, 1),
+      );
+    }
+
+    const coldBrochureRequested = requestedActionKinds.has("SEND_COLD_BROCHURE");
+    if (
+      current.intent === "COLD" &&
+      current.negativeSignals.length === 0 &&
+      !current.actions.coldBrochureSent &&
+      !coldBrochureRequested
+    ) {
+      commands.push({
+        commandId: `${current.callId}:send-cold-brochure`,
+        idempotencyKey: `${current.callId}:SEND_COLD_BROCHURE:v1`,
+        callId: current.callId,
+        kind: "SEND_COLD_BROCHURE",
+        payload: { state: current, requestedAt: now },
+        maxAttempts: 2,
+      });
     }
 
     if (current.callback.needsClarification) {
