@@ -110,7 +110,7 @@ test("configures one direct Realtime WebSocket before declaring the session read
     create_response: true,
     interrupt_response: true,
   });
-  assert.equal(configuredSession.max_output_tokens, 512);
+  assert.equal("max_output_tokens" in configuredSession, false);
   assert.deepEqual(configuredSession.reasoning, { effort: "low" });
 
   await session.close();

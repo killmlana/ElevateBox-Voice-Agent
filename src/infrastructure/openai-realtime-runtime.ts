@@ -42,7 +42,7 @@ export interface OpenAIRealtimeRuntimeConfig {
   inputTranscriptionModel?: string | null;
   transcriptionPrompt?: string;
   semanticVadEagerness?: "low" | "medium" | "high" | "auto";
-  maxOutputTokens?: number;
+  maxOutputTokens?: number | "inf";
   reasoningEffort?: "low" | "medium" | "high";
 }
 
@@ -56,7 +56,7 @@ interface ResolvedConfig {
   inputTranscriptionModel: string | null;
   transcriptionPrompt?: string;
   semanticVadEagerness?: "low" | "medium" | "high" | "auto";
-  maxOutputTokens: number;
+  maxOutputTokens?: number | "inf";
   reasoningEffort: "low" | "medium" | "high";
   languages: readonly SupportedLanguage[];
 }
@@ -226,9 +226,13 @@ export class OpenAIRealtimeRuntime implements ConversationRuntime {
   ) {
     if (!config.apiKey.trim()) throw new Error("OpenAI API key is required");
     if (!config.instructions.trim()) throw new Error("Realtime instructions are required");
-    const maxOutputTokens = config.maxOutputTokens ?? 512;
-    if (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > 4096) {
-      throw new Error("maxOutputTokens must be an integer between 1 and 4096");
+    const maxOutputTokens = config.maxOutputTokens;
+    if (
+      maxOutputTokens !== undefined &&
+      maxOutputTokens !== "inf" &&
+      (!Number.isInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > 4096)
+    ) {
+      throw new Error('maxOutputTokens must be "inf" or an integer between 1 and 4096');
     }
     this.config = {
       apiKey: config.apiKey,
@@ -250,7 +254,7 @@ export class OpenAIRealtimeRuntime implements ConversationRuntime {
       ...(config.semanticVadEagerness === undefined
         ? {}
         : { semanticVadEagerness: config.semanticVadEagerness }),
-      maxOutputTokens,
+      ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
       reasoningEffort: config.reasoningEffort ?? "low",
     };
     this.socketFactory = socketFactory;
@@ -450,7 +454,9 @@ class OpenAIRealtimeSession implements ConversationSessionPort {
         type: "realtime",
         model: this.config.model,
         output_modalities: ["audio"],
-        max_output_tokens: this.config.maxOutputTokens,
+        ...(this.config.maxOutputTokens === undefined
+          ? {}
+          : { max_output_tokens: this.config.maxOutputTokens }),
         reasoning: { effort: this.config.reasoningEffort },
         audio: {
           input: {
