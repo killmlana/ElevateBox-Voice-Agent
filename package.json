@@ -1,0 +1,23 @@
+{
+  "name": "elevatebox-voice-ai-prototype",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "demo": "node --experimental-strip-types src/demo.ts",
+    "smoke:realtime": "node --experimental-strip-types src/realtime-smoke.ts",
+    "realtime:mic": "node --experimental-strip-types src/realtime-microphone.ts",
+    "test": "node --experimental-strip-types test/all.test.ts",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.3.0",
+    "@types/ws": "^8.18.1"
+  }
+}
