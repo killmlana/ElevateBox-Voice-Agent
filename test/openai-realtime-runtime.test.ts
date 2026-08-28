@@ -102,7 +102,6 @@ test("configures one direct Realtime WebSocket before declaring the session read
   assert.deepEqual(output.format, { type: "audio/pcm", rate: 24000 });
   assert.deepEqual(input.transcription, {
     model: "gpt-live-transcribe",
-    languages: ["en", "hi", "te"],
   });
   assert.deepEqual(input.turn_detection, {
     type: "semantic_vad",
@@ -339,7 +338,9 @@ test("turns a WARM barrier directive into one callback-time question", async () 
 
   const update = socket.sent.at(-1)?.session as Record<string, unknown>;
   assert.match(String(update.instructions), /readiness barrier/i);
-  assert.match(String(update.instructions), /callback day and time/i);
+  assert.match(String(update.instructions), /WhatsApp consent has not yet been asked/i);
+  assert.match(String(update.instructions), /preferred callback day/i);
+  assert.match(String(update.instructions), /Never combine WhatsApp consent and callback timing/i);
   assert.match(String(update.instructions), /timing_barrier/i);
   await session.close();
 });
@@ -380,12 +381,13 @@ test("queues an immediate action result until the active Realtime response compl
   assert.equal(result?.type, "response.create");
   const response = result?.response as Record<string, unknown>;
   assert.deepEqual(response.output_modalities, ["audio"]);
-  assert.match(String(response.instructions), /send ho gaya/i);
+  assert.match(String(response.instructions), /locked language/i);
+  assert.match(String(response.instructions), /WhatsApp details were sent/i);
   assert.match(String(response.instructions), /Do not recap/i);
   await session.close();
 });
 
-test("confirms a COLD brochure briefly and closes without another question", async () => {
+test("confirms a COLD resume follow-up briefly and closes without another question", async () => {
   const { session, socket } = await openTestSession();
   await session.sendDirective({
     directiveId: "directive-cold-brochure",
@@ -397,8 +399,9 @@ test("confirms a COLD brochure briefly and closes without another question", asy
   });
 
   const response = socket.sent.at(-1)?.response as Record<string, unknown>;
-  assert.match(String(response.instructions), /brochure send ho gaya/i);
-  assert.match(String(response.instructions), /good day/i);
+  assert.match(String(response.instructions), /locked language/i);
+  assert.match(String(response.instructions), /resume was sent/i);
+  assert.match(String(response.instructions), /thank them/i);
   assert.match(String(response.instructions), /Do not ask another question/i);
   await session.close();
 });

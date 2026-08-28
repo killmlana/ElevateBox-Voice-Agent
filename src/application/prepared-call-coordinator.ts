@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type {
   ConversationRuntime,
   ConversationSessionPort,
+  OutboundCallProvider,
   SessionContext,
 } from "../contracts.ts";
 import {
@@ -20,6 +21,7 @@ export interface PreparedCallHandle {
   token: string;
   callId: string;
   expiresAt: string;
+  provider?: OutboundCallProvider;
 }
 
 /**
@@ -67,6 +69,7 @@ export class PreparedCallCoordinator {
       token,
       callId: context.callId,
       expiresAt: new Date(expiresAtMs).toISOString(),
+      provider: "exotel",
     };
   }
 

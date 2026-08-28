@@ -1,7 +1,13 @@
-import type { ExotelCallObserver } from "../infrastructure/exotel-call-adapter.ts";
+import type { TelephonyLifecycleObserver } from "../contracts.ts";
 
 export type LatencyMetricName =
   | "realtime_prewarm_ms"
+  | "openai_sip_readiness_ms"
+  | "pstn_answer_to_bridge_ms"
+  | "bridge_to_first_model_response_ms"
+  | "speech_stop_to_first_model_response_ms"
+  | "sip_barge_in_cancel_dispatch_ms"
+  | "sip_barge_in_cancel_ack_ms"
   | "last_input_media_to_speech_stop_ms"
   | "speech_stop_to_first_model_audio_ms"
   | "model_audio_to_telephony_send_ms"
@@ -29,7 +35,7 @@ function percentile(sorted: readonly number[], fraction: number): number {
   return sorted[index] ?? 0;
 }
 
-export class LiveCallLatencyRecorder implements ExotelCallObserver {
+export class LiveCallLatencyRecorder implements TelephonyLifecycleObserver {
   private readonly monotonicNow: () => number;
   private readonly wallNow: () => Date;
   private readonly values: LatencyMeasurement[] = [];
@@ -37,6 +43,8 @@ export class LiveCallLatencyRecorder implements ExotelCallObserver {
   private speechStoppedAt: number | undefined;
   private firstModelAudioAt: number | undefined;
   private bargeInAt: number | undefined;
+  private pstnAnsweredAt: number | undefined;
+  private bridgedAt: number | undefined;
 
   constructor(
     monotonicNow: () => number = () => performance.now(),
@@ -50,8 +58,21 @@ export class LiveCallLatencyRecorder implements ExotelCallObserver {
     this.record("realtime_prewarm_ms", valueMs);
   }
 
+  recordSipReadiness(valueMs: number): void {
+    this.record("openai_sip_readiness_ms", valueMs);
+  }
+
   onEvent(type: string, _payload: Record<string, unknown>): void {
     const now = this.monotonicNow();
+    if (type === "telephony.answered") {
+      this.pstnAnsweredAt = now;
+      return;
+    }
+    if (type === "telephony.started" && this.pstnAnsweredAt !== undefined) {
+      this.record("pstn_answer_to_bridge_ms", now - this.pstnAnsweredAt);
+      this.bridgedAt = now;
+      return;
+    }
     if (type === "telephony.media_received") {
       this.lastInputMediaAt = now;
       return;
@@ -65,6 +86,17 @@ export class LiveCallLatencyRecorder implements ExotelCallObserver {
       }
       this.speechStoppedAt = now;
       this.firstModelAudioAt = undefined;
+      return;
+    }
+    if (type === "model.response.started") {
+      if (this.bridgedAt !== undefined) {
+        this.record("bridge_to_first_model_response_ms", now - this.bridgedAt);
+        this.bridgedAt = undefined;
+      }
+      if (this.speechStoppedAt !== undefined) {
+        this.record("speech_stop_to_first_model_response_ms", now - this.speechStoppedAt);
+        this.speechStoppedAt = undefined;
+      }
       return;
     }
     if (type === "audio.output.delta" && this.firstModelAudioAt === undefined) {
@@ -91,6 +123,15 @@ export class LiveCallLatencyRecorder implements ExotelCallObserver {
     }
     if (type === "telephony.playback_cleared" && this.bargeInAt !== undefined) {
       this.record("barge_in_to_playback_clear_ms", now - this.bargeInAt);
+      this.bargeInAt = undefined;
+      return;
+    }
+    if (type === "sip.response_cancel_sent" && this.bargeInAt !== undefined) {
+      this.record("sip_barge_in_cancel_dispatch_ms", now - this.bargeInAt);
+      return;
+    }
+    if (type === "sip.response_cancelled" && this.bargeInAt !== undefined) {
+      this.record("sip_barge_in_cancel_ack_ms", now - this.bargeInAt);
       this.bargeInAt = undefined;
     }
   }

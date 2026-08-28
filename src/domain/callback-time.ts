@@ -113,9 +113,19 @@ export function resolveCallbackTime(rawTime: string, base: Date): CallbackResolu
     time = { hour: 18, minute: 0 };
   }
   if (!time) {
+    const local = localDatePartsInIst(base);
+    const dayOffset = isTomorrow ? 1 : 0;
+    const targetDate = new Date(Date.UTC(local.year, local.month, local.day + dayOffset));
     return {
       status: "needs_clarification",
       rawTime,
+      proposedAt: istLocalToIso(
+        targetDate.getUTCFullYear(),
+        targetDate.getUTCMonth(),
+        targetDate.getUTCDate(),
+        18,
+        0,
+      ),
       reason: "The callback day is known, but the time or time window is missing.",
     };
   }
@@ -134,4 +144,20 @@ export function resolveCallbackTime(rawTime: string, base: Date): CallbackResolu
       time.minute,
     ),
   };
+}
+
+export type CallbackConfirmation = "affirmative" | "negative" | "unknown";
+
+/** Deliberately conservative: only short, direct replies confirm or reject a proposal. */
+export function callbackConfirmation(text: string): CallbackConfirmation {
+  const normalized = text.trim().toLowerCase().replace(/[.!?,]/g, " ")
+    .replace(/\s+/g, " ").trim();
+  if (!normalized || normalized.length > 80) return "unknown";
+  if (
+    /^(?:yes|yeah|yep|sure|okay|ok|that works|works for me|fine|haan|ha|theek hai|thik hai|हाँ|हां|ठीक है|అవును|సరే)$/iu.test(normalized)
+  ) return "affirmative";
+  if (
+    /^(?:no|nope|nah|not possible|doesn'?t work|nahi|nahin|नहीं|नही|కాదు|వద్దు)$/iu.test(normalized)
+  ) return "negative";
+  return "unknown";
 }

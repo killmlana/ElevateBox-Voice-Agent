@@ -1,0 +1,9 @@
+[general]
+enabled=yes
+pretty=no
+
+[elevatebox]
+type=user
+read_only=no
+password=<GENERATE_A_LONG_RANDOM_PASSWORD>
+

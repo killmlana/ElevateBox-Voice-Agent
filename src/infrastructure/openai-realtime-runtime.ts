@@ -153,15 +153,21 @@ function eventId(prefix: string, sequence: number): string {
   return `${prefix}_${sequence.toString().padStart(6, "0")}`;
 }
 
-function directiveInstruction(directive: ConversationDirective): string {
+export function directiveInstruction(directive: ConversationDirective): string {
   const details = JSON.stringify(directive.data);
   switch (directive.intent) {
     case "ASK_SEND_PERMISSION":
-      return `At the next natural pause, ask permission before sending details. Context: ${details}`;
+      if (directive.data.callbackDeclinedWithoutAlternative === true) {
+        return `In the lead's locked language, briefly say there is no problem and the lead can call whenever free. Then ask exactly one short question for permission to send the resume on WhatsApp to the existing call number. Do not imply that the callback is booked. Context: ${details}`;
+      }
+      return `At the next natural pause, ask one brief, natural question in the lead's locked language that confirms permission to send details on WhatsApp to the existing call number. Context: ${details}`;
     case "ASK_CALLBACK_TIME":
-      return `A real need has a readiness barrier. Briefly acknowledge the specific barrier, then ask one concise question for the lead's preferred callback day and time. Do not continue broad discovery first. Context: ${details}`;
+      return `A real need has a readiness barrier. If WhatsApp consent has not yet been asked in this conversation, ask that one consent question first and defer the callback question. Otherwise briefly acknowledge the barrier, then ask exactly one short question for the preferred callback day. Never combine WhatsApp consent and callback timing in one turn. Context: ${details}`;
     case "ASK_CALLBACK_CLARIFICATION":
-      return `Ask one concise question to resolve the callback date or time. Context: ${details}`;
+      if (directive.data.proposedAt) {
+        return `The callback day is known but its time is vague. In the lead's locked language, ask exactly one short yes-or-no question proposing 6 PM on that day. Then stop. Do not book it until the lead confirms. Context: ${details}`;
+      }
+      return `Ask exactly one short question for only the missing callback component: date or time, never both. Context: ${details}`;
     case "INTENT_UPDATED":
       return `Internal lead state changed. Adapt naturally and never mention an internal lead label. Context: ${details}`;
     case "CONFIRM_ACTION_SUCCESS":
@@ -174,43 +180,31 @@ function directiveInstruction(directive: ConversationDirective): string {
   }
 }
 
-function immediateDirectiveInstruction(directive: ConversationDirective): string {
+export function immediateDirectiveInstruction(directive: ConversationDirective): string {
   const simulated = directive.data.simulated === true;
   if (directive.intent === "CONFIRM_ACTION_SUCCESS") {
     const kind = String(directive.data.kind ?? "action");
     if (simulated) {
       if (kind === "SEND_COLD_BROCHURE") {
-        return `Speak exactly one brief sentence in the lead's locked language: "Okay, local test mein brochure send simulate hua; real message nahi gaya. Thank you." Do not ask another question.`;
+        return `In the lead's locked language, say in one brief sentence that this was only a local simulation and no real resume was sent. Thank them. Do not ask another question.`;
       }
-      return `Speak exactly one brief sentence in the lead's locked language: "Okay, local test mein ${kind} simulate ho gaya; real message nahi gaya." Do not recap, ask a question, or request confirmation.`;
+      return `In the lead's locked language, say in one brief sentence that ${kind} was only simulated and did not happen externally. Do not recap, ask a question, or request confirmation.`;
     }
     if (kind === "SEND_HOT_DETAILS") {
-      return `Speak exactly one brief sentence in the lead's locked language: "Okay, send ho gaya." Do not recap, ask a question, or request confirmation.`;
+      return `In the lead's locked language, say one brief natural sentence confirming that the WhatsApp details were sent. Do not recap, ask a question, or request confirmation.`;
     }
     if (kind === "BOOK_CALLBACK") {
-      return `Speak exactly one brief sentence in the lead's locked language: "Okay, callback book ho gaya." Do not recap, ask a question, or request confirmation.`;
+      return `In the lead's locked language, say one brief natural sentence confirming that the callback was booked. Do not recap, ask a question, or request confirmation.`;
     }
     if (kind === "SEND_COLD_BROCHURE") {
-      return `Speak exactly one brief sentence in the lead's locked language: "Okay, brochure send ho gaya. Thank you, have a good day." Do not ask another question or continue discovery.`;
+      return `In the lead's locked language, say one brief natural sentence confirming that the resume was sent, then thank them. Do not ask another question or continue discovery.`;
     }
-    return `Speak exactly one brief sentence confirming that the ${kind} action succeeded. Do not recap, ask a question, or request confirmation.`;
+    return `In the lead's locked language, speak one brief natural sentence confirming that the ${kind} action succeeded. Do not recap, ask a question, or request confirmation.`;
   }
-  return "Speak one brief apology saying the requested action did not complete. Do not claim success, recap, or ask another question.";
+  return "In the lead's locked language, speak one brief apology saying the requested action did not complete. Do not claim success, recap, or ask another question.";
 }
 
-function transcriptionLanguages(
-  languages: readonly SupportedLanguage[] | undefined,
-): string[] {
-  const mapped = new Set<string>();
-  for (const language of languages ?? []) {
-    if (language === "EN") mapped.add("en");
-    if (language === "HI") mapped.add("hi");
-    if (language === "TE") mapped.add("te");
-  }
-  return [...mapped];
-}
-
-function languageLockInstruction(language: SupportedLanguage): string {
+export function languageLockInstruction(language: SupportedLanguage): string {
   if (language === "HI") {
     return "LANGUAGE LOCK: The lead explicitly chose Hindi. Keep Hindi/Hinglish as the base for every reply, with Hindi sentence structure. Common English business or technical terms are fine. Do not switch the base language merely because the lead code-switches; switch only if they explicitly request another language.";
   }
@@ -381,6 +375,16 @@ class OpenAIRealtimeSession implements ConversationSessionPort {
     });
   }
 
+  async cancelOutput(): Promise<void> {
+    this.assertUsable();
+    if (!this.responseActive) return;
+    this.send({
+      event_id: this.nextEventId("cancel"),
+      type: "response.cancel",
+    });
+    this.responseActive = false;
+  }
+
   async setPreferredLanguage(language: SupportedLanguage): Promise<void> {
     this.assertUsable();
     this.preferredLanguage = language;
@@ -445,11 +449,9 @@ class OpenAIRealtimeSession implements ConversationSessionPort {
   private configureSession(): void {
     if (this.configurationSent) return;
     this.configurationSent = true;
-    const languages = transcriptionLanguages(this.configuredLanguages());
     const transcription = this.config.inputTranscriptionModel
       ? {
           model: this.config.inputTranscriptionModel,
-          ...(languages.length === 0 ? {} : { languages }),
           ...(this.config.transcriptionPrompt === undefined
             ? {}
             : { prompt: this.config.transcriptionPrompt }),

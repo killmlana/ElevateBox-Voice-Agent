@@ -7,6 +7,7 @@
     "node": ">=24"
   },
   "scripts": {
+    "start": "node --experimental-strip-types src/production.ts",
     "demo": "node --experimental-strip-types src/demo.ts",
     "smoke:realtime": "node --experimental-strip-types src/realtime-smoke.ts",
     "realtime:mic": "node --experimental-strip-types src/realtime-microphone.ts",

@@ -60,8 +60,13 @@ export class LeadPolicy {
     }
 
     const hotMessageRequested = requestedActionKinds.has("SEND_HOT_DETAILS");
+    // Consent is sticky: once the lead has peaked at HOT we honour a later
+    // "send me details" even if a blocker has since pulled intent back to WARM.
+    // Gating on the instantaneous tier dropped the send to the post-call
+    // follow-up, so the voice model could never confirm it on the call.
+    const consentEligible = current.intent === "HOT" || current.hotPeaked;
     if (
-      current.intent === "HOT" &&
+      consentEligible &&
       (hasSignal(update, "send_details") || stateHasSignal(current, "send_details")) &&
       !current.actions.hotWhatsappSent &&
       !hotMessageRequested
@@ -111,6 +116,7 @@ export class LeadPolicy {
     if (
       current.intent === "COLD" &&
       current.negativeSignals.length === 0 &&
+      stateHasSignal(current, "send_details") &&
       !current.actions.coldBrochureSent &&
       !coldBrochureRequested
     ) {
@@ -122,12 +128,30 @@ export class LeadPolicy {
         payload: { state: current, requestedAt: now },
         maxAttempts: 2,
       });
+    } else if (
+      current.intent === "COLD" &&
+      previous.intent !== "COLD" &&
+      current.negativeSignals.length === 0 &&
+      !stateHasSignal(current, "send_details") &&
+      !current.actions.coldBrochureSent
+    ) {
+      directives.push(
+        directive(current, "ASK_SEND_PERMISSION", current.updatedAt, {
+          reason: current.callback.declinedWithoutAlternative
+            ? "The proposed callback was declined without another time. Say they can call whenever free, then ask permission to send the resume on WhatsApp."
+            : "Ask whether the lead wants the resume on WhatsApp before sending it.",
+          callbackDeclinedWithoutAlternative:
+            current.callback.declinedWithoutAlternative,
+        }, 1),
+      );
     }
 
     if (current.callback.needsClarification) {
       directives.push(
         directive(current, "ASK_CALLBACK_CLARIFICATION", current.updatedAt, {
           rawTime: current.callback.rawTime,
+          proposedAt: current.callback.proposedAt,
+          proposedLocalTime: current.callback.proposedAt ? "6 PM" : undefined,
         }, 1),
       );
     }
@@ -145,6 +169,7 @@ export class LeadPolicy {
         payload: {
           resolvedAt: current.callback.resolvedAt,
           rawTime: current.callback.rawTime,
+          preferredLanguage: current.language,
         },
         maxAttempts: 2,
       });

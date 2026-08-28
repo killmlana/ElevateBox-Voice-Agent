@@ -25,7 +25,10 @@ export class FakeMessagingAdapter implements MessagingAdapter {
     this.remainingFailures = options.failAttempts ?? 0;
   }
 
-  async send(message: OutgoingMessage): Promise<{ externalId: string }> {
+  async send(message: OutgoingMessage): Promise<{
+    externalId: string;
+    simulated?: boolean;
+  }> {
     await delay(this.delayMs);
     if (this.remainingFailures > 0) {
       this.remainingFailures -= 1;
@@ -35,10 +38,10 @@ export class FakeMessagingAdapter implements MessagingAdapter {
       (delivery) => delivery.idempotencyKey === message.idempotencyKey,
     );
     if (existingIndex >= 0) {
-      return { externalId: `wamid.fake.${existingIndex + 1}` };
+      return { externalId: `wamid.fake.${existingIndex + 1}`, simulated: true };
     }
     this.deliveries.push(message);
-    return { externalId: `wamid.fake.${this.deliveries.length}` };
+    return { externalId: `wamid.fake.${this.deliveries.length}`, simulated: true };
   }
 }
 
@@ -52,7 +55,10 @@ export class FakeSchedulerAdapter implements SchedulerAdapter {
     this.remainingFailures = options.failAttempts ?? 0;
   }
 
-  async book(booking: CallbackBooking): Promise<{ externalId: string }> {
+  async book(booking: CallbackBooking): Promise<{
+    externalId: string;
+    simulated?: boolean;
+  }> {
     await delay(this.delayMs);
     if (this.remainingFailures > 0) {
       this.remainingFailures -= 1;
@@ -62,9 +68,9 @@ export class FakeSchedulerAdapter implements SchedulerAdapter {
       (item) => item.idempotencyKey === booking.idempotencyKey,
     );
     if (existingIndex >= 0) {
-      return { externalId: `callback.fake.${existingIndex + 1}` };
+      return { externalId: `callback.fake.${existingIndex + 1}`, simulated: true };
     }
     this.bookings.push(booking);
-    return { externalId: `callback.fake.${this.bookings.length}` };
+    return { externalId: `callback.fake.${this.bookings.length}`, simulated: true };
   }
 }

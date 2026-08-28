@@ -1,11 +1,11 @@
 import type {
-  ConversationSessionPort,
+  ConversationControlSessionPort,
   StableTurn,
   SupportedLanguage,
+  TelephonyLifecycleObserver,
   VoiceRuntimeEvent,
 } from "../contracts.ts";
 import type {
-  ExotelCallObserver,
   ExotelServerSocket,
 } from "../infrastructure/exotel-call-adapter.ts";
 import { ExotelCallAdapter } from "../infrastructure/exotel-call-adapter.ts";
@@ -13,6 +13,7 @@ import type { PrototypeCallSession, PrototypeSystem } from "./prototype-system.t
 import { LiveCallLatencyRecorder } from "./live-call-latency.ts";
 import { PreparedCallCoordinator, type PreparedCallHandle } from "./prepared-call-coordinator.ts";
 import { SerialTaskQueue } from "./serial-task-queue.ts";
+import { explicitLanguageChoice } from "../domain/language-choice.ts";
 import type { ConversationRuntime, SessionContext } from "../contracts.ts";
 
 interface CompletedTurnPayload {
@@ -21,6 +22,9 @@ interface CompletedTurnPayload {
   turnSequence: number;
   languages?: unknown;
 }
+
+/** Consecutive agreeing turns before the model is locked to a detected language. */
+const LANGUAGE_SETTLE_TURNS = 2;
 
 function languageHint(raw: unknown): SupportedLanguage | undefined {
   if (!Array.isArray(raw)) return undefined;
@@ -60,11 +64,12 @@ function completedTurn(payload: Record<string, unknown>): CompletedTurnPayload |
   };
 }
 
-export class LiveCallController implements ExotelCallObserver {
-  private readonly conversation: ConversationSessionPort;
+export class LiveCallController implements TelephonyLifecycleObserver {
+  private readonly conversation: ConversationControlSessionPort;
   private readonly workflow: PrototypeCallSession;
   private readonly latency: LiveCallLatencyRecorder;
   private readonly wallNow: () => Date;
+  private readonly openingInstruction: string | undefined;
   private readonly controlQueue = new SerialTaskQueue();
   private readonly directiveQueue = new SerialTaskQueue();
   private readonly turnWork = new Set<Promise<void>>();
@@ -73,24 +78,42 @@ export class LiveCallController implements ExotelCallObserver {
   private assistantTranscript = "";
   private readonly precedingAssistantByTurnId = new Map<string, string>();
   private actionFlush: Promise<void> = Promise.resolve();
+  private settledLanguage: SupportedLanguage | undefined;
+  private pendingLanguage: SupportedLanguage | undefined;
+  private pendingLanguageStreak = 0;
+  private languageExplicitlyChosen = false;
   private backgroundFailure?: unknown;
   private voiceStopped = false;
   private endScheduled = false;
+  private conversationStarted = false;
 
   constructor(
-    conversation: ConversationSessionPort,
+    conversation: ConversationControlSessionPort,
     workflow: PrototypeCallSession,
     latency: LiveCallLatencyRecorder,
     wallNow: () => Date = () => new Date(),
+    openingInstruction?: string,
   ) {
     this.conversation = conversation;
     this.workflow = workflow;
     this.latency = latency;
     this.wallNow = wallNow;
+    this.openingInstruction = openingInstruction;
   }
 
   onEvent(type: string, payload: Record<string, unknown>): void {
     this.latency.onEvent(type, payload);
+    if (
+      type === "telephony.started" &&
+      this.openingInstruction !== undefined &&
+      !this.conversationStarted
+    ) {
+      this.conversationStarted = true;
+      this.controlQueue.enqueue(async () => {
+        await this.conversation.startConversation(this.openingInstruction);
+      });
+      return;
+    }
     if (type === "response.output_item.added") {
       this.assistantTranscript = "";
       return;
@@ -170,8 +193,52 @@ export class LiveCallController implements ExotelCallObserver {
           ? {}
           : { languageHint: detectedLanguage }),
       };
+      const selectedLanguage = explicitLanguageChoice(
+        completed.transcript,
+        precedingAssistantText,
+      );
+      if (selectedLanguage) {
+        this.languageExplicitlyChosen = true;
+        this.settledLanguage = selectedLanguage;
+        this.pendingLanguage = undefined;
+        this.pendingLanguageStreak = 0;
+        await this.conversation.setPreferredLanguage(selectedLanguage);
+      } else if (!this.languageExplicitlyChosen) {
+        const settled = this.settleDetectedLanguage(detectedLanguage);
+        if (settled) await this.conversation.setPreferredLanguage(settled);
+      }
       this.scheduleTurnProcessing(turn);
     }
+  }
+
+  /**
+   * Returns a language to lock the model to, or undefined to leave it alone.
+   *
+   * Detection is only trusted once consecutive turns agree: a single reading is
+   * routinely wrong on short utterances, and locking on it would be worse than
+   * the drift. MIXED and UNKNOWN never settle - they are the ambiguous readings,
+   * and committing to them cements the code-switching we are trying to stop.
+   * An explicit request from the lead outranks this and stops detection pushes
+   * for the rest of the call.
+   */
+  private settleDetectedLanguage(
+    detected: SupportedLanguage | undefined,
+  ): SupportedLanguage | undefined {
+    if (detected === undefined || detected === "UNKNOWN" || detected === "MIXED") {
+      this.pendingLanguage = undefined;
+      this.pendingLanguageStreak = 0;
+      return undefined;
+    }
+    if (detected === this.pendingLanguage) {
+      this.pendingLanguageStreak += 1;
+    } else {
+      this.pendingLanguage = detected;
+      this.pendingLanguageStreak = 1;
+    }
+    if (this.pendingLanguageStreak < LANGUAGE_SETTLE_TURNS) return undefined;
+    if (detected === this.settledLanguage) return undefined;
+    this.settledLanguage = detected;
+    return detected;
   }
 
   private scheduleTurnProcessing(turn: StableTurn): void {
@@ -247,6 +314,7 @@ export class LiveCallCoordinator {
   private readonly workflows: PrototypeSystem;
   private readonly monotonicNow: () => number;
   private readonly wallNow: () => Date;
+  private readonly openingInstruction: string | undefined;
   private readonly prepared = new Map<string, PreparedWorkflow>();
 
   constructor(
@@ -257,11 +325,13 @@ export class LiveCallCoordinator {
       wallNow?: () => Date;
       tokenFactory?: () => string;
       ttlMs?: number;
+      openingInstruction?: string;
     } = {},
   ) {
     this.monotonicNow = options.monotonicNow ?? (() => performance.now());
     this.wallNow = options.wallNow ?? (() => new Date());
     this.workflows = workflows;
+    this.openingInstruction = options.openingInstruction;
     this.voice = new PreparedCallCoordinator(runtime, {
       ...(options.tokenFactory === undefined
         ? {}
@@ -300,6 +370,7 @@ export class LiveCallCoordinator {
       workflow,
       latency,
       this.wallNow,
+      this.openingInstruction,
     );
     const adapter = new ExotelCallAdapter(socket, conversation, {
       observer: controller,

@@ -1,0 +1,8 @@
+[from-zadarma]
+exten => _X.,1,NoOp(Inbound PSTN is outside the ElevateBox outbound-only scope)
+ same => n,Hangup()
+
+[from-openai]
+exten => _X.,1,NoOp(Unsolicited inbound OpenAI routing is disabled)
+ same => n,Hangup()
+

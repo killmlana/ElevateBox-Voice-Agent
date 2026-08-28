@@ -1,0 +1,25 @@
+[Unit]
+Description=ElevateBox Zadarma/Asterisk/OpenAI SIP supervisor
+After=network-online.target asterisk.service
+Wants=network-online.target
+Requires=asterisk.service
+
+[Service]
+Type=simple
+User=elevatebox
+Group=elevatebox
+WorkingDirectory=/opt/elevatebox/prototype
+EnvironmentFile=/etc/elevatebox/elevatebox.env
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target
+

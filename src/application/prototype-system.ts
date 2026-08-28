@@ -2,6 +2,7 @@ import type {
   CandidateContext,
 } from "./message-composer.ts";
 import type {
+  CallbackTimeResolverPort,
   Clock,
   ConversationDirective,
   LeadUnderstandingPort,
@@ -93,6 +94,13 @@ export class PrototypeCallSession {
     await this.actionQueue.idle();
   }
 
+  async recordTelemetry(
+    type: "call.latency_summary",
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    await this.supervisor.recordTelemetry(this.callId, type, payload);
+  }
+
   state(): LeadState {
     return this.supervisor.state(this.callId);
   }
@@ -128,6 +136,7 @@ export class PrototypeSystem {
     scheduler: SchedulerAdapter,
     understanding: LeadUnderstandingPort,
     eventSink?: NormalizedEventSink,
+    callbackTimes?: CallbackTimeResolverPort,
   ) {
     this.events = new InMemoryEventStore(clock, eventSink);
     const orchestrator = new ConversationOrchestrator();
@@ -136,6 +145,7 @@ export class PrototypeSystem {
       this.events,
       orchestrator,
       understanding,
+      callbackTimes,
     );
     const composer = new MessageComposer(config.candidate, config.leadPhone);
     this.actionManager = new ActionManager(

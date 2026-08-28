@@ -69,6 +69,17 @@ export class DeterministicLeadClassifier {
     }
     const score = scoreBreakdown.reduce((total, item) => total + item.delta, 0);
 
+    if (state.callback.declinedWithoutAlternative) {
+      return {
+        intent: "COLD",
+        score,
+        scoreBreakdown,
+        confidence: 0.94,
+        evidenceTurnIds: turns,
+        rationale: "The lead declined the proposed callback and did not offer another time.",
+      };
+    }
+
     if (
       negativeSignals.has("do_not_contact") ||
       negativeSignals.has("not_interested") ||

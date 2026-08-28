@@ -184,9 +184,6 @@ const system = new PrototypeSystem(
       candidatePhone:
         process.env.ELEVATEBOX_CONTACT_NUMBER ?? "+91-REPLACE-WITH-YOUR-NUMBER",
       resumeUrl: process.env.ELEVATEBOX_RESUME_PATH ?? "resume.pdf",
-      architectureUrl:
-        process.env.ELEVATEBOX_BUILD_IMAGE_PATH ?? "architecture.png",
-      brochureUrl: process.env.ELEVATEBOX_BROCHURE_PATH ?? "brochure.pdf",
     },
   },
   new SystemClock(),
@@ -212,6 +209,7 @@ workflowLatency.recordPrewarm(readyAt - startedAt);
 const workflowSession: ConversationSessionPort = {
   startConversation: (instruction) => session.startConversation(instruction),
   setPreferredLanguage: (language) => session.setPreferredLanguage(language),
+  cancelOutput: () => session.cancelOutput(),
   sendAudio: (frame) => session.sendAudio(frame),
   interruptOutput: (playedAudioMs) => session.interruptOutput(playedAudioMs),
   events: () => session.events(),

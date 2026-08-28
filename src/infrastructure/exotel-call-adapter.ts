@@ -1,6 +1,7 @@
 import type {
   AudioFrame,
   ConversationSessionPort,
+  TelephonyLifecycleObserver,
   VoiceRuntimeEvent,
 } from "../contracts.ts";
 import { SerialTaskQueue } from "../application/serial-task-queue.ts";
@@ -13,9 +14,8 @@ export interface ExotelServerSocket {
   send(data: string): void;
 }
 
-export interface ExotelCallObserver {
-  onEvent(type: string, payload: Record<string, unknown>): void;
-}
+/** @deprecated Use the provider-neutral lifecycle observer. */
+export type ExotelCallObserver = TelephonyLifecycleObserver;
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null

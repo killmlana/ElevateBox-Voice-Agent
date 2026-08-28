@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { resolveCallbackTime } from "../src/domain/callback-time.ts";
+import {
+  callbackConfirmation,
+  resolveCallbackTime,
+} from "../src/domain/callback-time.ts";
 
 const base = new Date("2026-08-26T10:00:00.000Z");
 
@@ -9,6 +12,14 @@ test("resolves tomorrow morning to 10:00 Asia/Kolkata", () => {
   const result = resolveCallbackTime("tomorrow morning", base);
   assert.equal(result.status, "resolved");
   assert.equal(result.resolvedAt, "2026-08-27T04:30:00.000Z");
+});
+
+test("recognizes short callback confirmations in each supported language", () => {
+  assert.equal(callbackConfirmation("yes"), "affirmative");
+  assert.equal(callbackConfirmation("हाँ"), "affirmative");
+  assert.equal(callbackConfirmation("అవును"), "affirmative");
+  assert.equal(callbackConfirmation("no"), "negative");
+  assert.equal(callbackConfirmation("నాకు 7 pm బాగుంటుంది"), "unknown");
 });
 
 test("resolves an explicit tomorrow time", () => {
@@ -32,5 +43,6 @@ test("resolves a Telugu tomorrow-evening callback with a spoken hour", () => {
 test("requests clarification when a time window is absent", () => {
   const result = resolveCallbackTime("tomorrow", base);
   assert.equal(result.status, "needs_clarification");
+  assert.equal(result.proposedAt, "2026-08-27T12:30:00.000Z");
   assert.match(result.reason ?? "", /time/i);
 });

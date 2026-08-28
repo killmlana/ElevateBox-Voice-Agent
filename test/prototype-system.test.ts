@@ -31,8 +31,6 @@ function buildSystem(
       candidate: {
         candidatePhone: "+919999999999",
         resumeUrl: "resume.pdf",
-        architectureUrl: "architecture.png",
-        brochureUrl: "brochure.pdf",
       },
     },
     clock,
@@ -91,6 +89,26 @@ test("fires one high-intent WhatsApp while active without duplicating it after e
   assert.equal(call.state().intent, "HOT");
   assert.equal(messaging.deliveries.length, 1);
   assert.equal(call.state().actions.hotWhatsappSent, true);
+  assert.match(
+    messaging.deliveries[0]?.body ?? "",
+    /^Hi, I am Ayanabh\. My number is \+919999999999\. We spoke about /,
+  );
+  assert.match(messaging.deliveries[0]?.body ?? "", /attached my resume as discussed/);
+  assert.match(messaging.deliveries[0]?.body ?? "", /around 250 products/);
+  assert.match(messaging.deliveries[0]?.body ?? "", /budget of about ₹80,000/);
+  assert.match(messaging.deliveries[0]?.body ?? "", /this week timeline/);
+  assert.match(messaging.deliveries[0]?.body ?? "", /rental return workflow/);
+  assert.match(messaging.deliveries[0]?.body ?? "", /damage-deposit tracking/);
+  assert.doesNotMatch(
+    messaging.deliveries[0]?.body ?? "",
+    /(?:business|requirements|timeline|budget):/i,
+  );
+  assert.ok(
+    call.takeDirectives().some((item) =>
+      item.intent === "CONFIRM_ACTION_SUCCESS" && item.data.simulated === true
+    ),
+    "dry-run success must never be announced as a real send",
+  );
 
   call.submitStableTurn({
     turnId: "turn-3",
@@ -111,7 +129,7 @@ test("fires one high-intent WhatsApp while active without duplicating it after e
   await call.idle();
   assert.equal(call.state().callState, "ENDED");
   assert.equal(messaging.deliveries.length, 1);
-  assert.deepEqual(messaging.deliveries[0]?.attachments, ["resume.pdf", "architecture.png"]);
+  assert.deepEqual(messaging.deliveries[0]?.attachments, ["resume.pdf"]);
 
   const persistedEvents = system.eventsFor("call-1");
   assert.deepEqual(replayLeadState("call-1", persistedEvents), call.state());
@@ -123,6 +141,12 @@ test("fires one high-intent WhatsApp while active without duplicating it after e
     4,
   );
   assert.equal(eventTypes.filter((type) => type === "action.succeeded").length, 2);
+  assert.ok(
+    persistedEvents.some((event) =>
+      event.type === "action.succeeded" &&
+      (event.payload as { simulated?: boolean }).simulated === true
+    ),
+  );
 });
 
 test("turns a HOT price-and-timeline enquiry into one confident WhatsApp handoff", async () => {
@@ -184,13 +208,85 @@ test("captures a WARM timing barrier, requests a callback time, and books it", a
   assert.equal(scheduler.bookings.length, 1);
 
   await call.endAndWait();
-  assert.equal(messaging.deliveries.length, 1);
-  assert.match(messaging.deliveries[0]?.body ?? "", /Callback requested/i);
+  assert.equal(
+    messaging.deliveries.length,
+    0,
+    "a callback request is not also WhatsApp consent",
+  );
 });
 
-test("sends one brochure for a COLD just-looking lead and moves on", async () => {
+test("proposes 6 PM for a vague day and books only after confirmation", async () => {
+  const { system, scheduler } = buildSystem({
+    "language-choice": { language: "EN" },
+    "callback-vague": { callbackPhrase: "tomorrow" },
+    "callback-yes": { callbackPhrase: "yes" },
+  });
+  const call = await system.startCall("call-callback-confirmation");
+
+  await call.submitStableTurnAndWait({
+    turnId: "language-choice",
+    text: "English.",
+    occurredAt: "2026-08-26T10:00:00.000Z",
+    precedingAssistantText: "Which language are you comfortable with?",
+  });
+
+  await call.submitStableTurnAndWait({
+    turnId: "callback-vague",
+    text: "Tomorrow.",
+    occurredAt: "2026-08-26T10:00:01.000Z",
+    precedingAssistantText: "When should I call you back?",
+  });
+  assert.equal(call.state().callback.awaitingConfirmation, true);
+  assert.equal(call.state().callback.proposedAt, "2026-08-27T12:30:00.000Z");
+  assert.equal(scheduler.bookings.length, 0);
+  assert.ok(call.takeDirectives().some((item) =>
+    item.intent === "ASK_CALLBACK_CLARIFICATION" && item.data.proposedLocalTime === "6 PM"
+  ));
+
+  await call.submitStableTurnAndWait({
+    turnId: "callback-yes",
+    text: "Yes.",
+    occurredAt: "2026-08-26T10:00:02.000Z",
+    precedingAssistantText: "Would 6 PM tomorrow work?",
+  });
+  await call.idle();
+  assert.equal(call.state().callback.booked, true);
+  assert.equal(scheduler.bookings[0]?.scheduledAt, "2026-08-27T12:30:00.000Z");
+  assert.equal(scheduler.bookings[0]?.preferredLanguage, "EN");
+});
+
+test("makes a declined callback with no alternative COLD without bypassing WhatsApp consent", async () => {
+  const { system, messaging } = buildSystem({
+    "callback-vague": { callbackPhrase: "tomorrow" },
+    "callback-no": {},
+  });
+  const call = await system.startCall("call-callback-declined");
+  await call.submitStableTurnAndWait({
+    turnId: "callback-vague",
+    text: "Tomorrow.",
+    occurredAt: "2026-08-26T10:00:01.000Z",
+  });
+  call.takeDirectives();
+  await call.submitStableTurnAndWait({
+    turnId: "callback-no",
+    text: "No.",
+    occurredAt: "2026-08-26T10:00:02.000Z",
+    precedingAssistantText: "Would 6 PM tomorrow work?",
+  });
+  await call.idle();
+  assert.equal(call.state().intent, "COLD");
+  assert.equal(call.state().callback.declinedWithoutAlternative, true);
+  assert.equal(messaging.deliveries.length, 0);
+  assert.ok(call.takeDirectives().some((item) =>
+    item.intent === "ASK_SEND_PERMISSION" &&
+    item.data.callbackDeclinedWithoutAlternative === true
+  ));
+});
+
+test("sends one resume follow-up for a COLD just-looking lead and moves on", async () => {
   const { system, messaging } = buildSystem({
     "cold-1": { blockers: ["just_looking"] },
+    "cold-2": { buyingSignals: ["send_details"] },
   });
   const call = await system.startCall("call-cold");
 
@@ -201,9 +297,21 @@ test("sends one brochure for a COLD just-looking lead and moves on", async () =>
   });
   await call.idle();
   assert.equal(call.state().intent, "COLD");
+  assert.equal(call.state().actions.coldBrochureSent, false);
+  assert.equal(messaging.deliveries.length, 0);
+  assert.ok(
+    call.takeDirectives().some((item) => item.intent === "ASK_SEND_PERMISSION"),
+  );
+
+  await call.submitStableTurnAndWait({
+    turnId: "cold-2",
+    text: "Yes, send the resume to this number on WhatsApp.",
+    occurredAt: "2026-08-26T10:00:02.000Z",
+  });
+  await call.idle();
   assert.equal(call.state().actions.coldBrochureSent, true);
   assert.equal(messaging.deliveries.length, 1);
-  assert.deepEqual(messaging.deliveries[0]?.attachments, ["brochure.pdf"]);
+  assert.deepEqual(messaging.deliveries[0]?.attachments, ["resume.pdf"]);
   assert.ok(
     system.eventsFor("call-cold").some((event) =>
       event.type === "action.requested" &&
@@ -212,7 +320,7 @@ test("sends one brochure for a COLD just-looking lead and moves on", async () =>
   );
 
   await call.endAndWait();
-  assert.equal(messaging.deliveries.length, 1, "call end must not duplicate the brochure");
+  assert.equal(messaging.deliveries.length, 1, "call end must not duplicate the resume");
 });
 
 test("suppresses every follow-up when a COLD lead opts out", async () => {
@@ -308,7 +416,6 @@ test("records a lead-analysis failure and recovers on the next stable turn", asy
       candidate: {
         candidatePhone: "+919999999999",
         resumeUrl: "resume.pdf",
-        architectureUrl: "architecture.png",
       },
     },
     new FixedClock("2026-08-26T10:00:00.000Z"),
@@ -370,7 +477,6 @@ test("analyzes stable turns concurrently but applies lead state in turn order", 
       candidate: {
         candidatePhone: "+919999999999",
         resumeUrl: "resume.pdf",
-        architectureUrl: "architecture.png",
       },
     },
     new FixedClock("2026-08-26T10:00:00.000Z"),

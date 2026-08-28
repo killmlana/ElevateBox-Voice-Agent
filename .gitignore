@@ -1,5 +1,25 @@
 node_modules/
-.env
 coverage/
 *.log
 logs/
+
+# Environment — never commit real credentials.
+# .env.example is the only environment file that belongs in git.
+.env
+.env.*
+.envold
+!.env.example
+
+# AI assistant / agent working directories
+.claude/
+.codex/
+.agents/
+.cursor/
+.windsurf/
+.continue/
+.gemini/
+.aider*
+.opencode/
+.roo/
+.cline/
+.serena/

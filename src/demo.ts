@@ -40,7 +40,6 @@ const system = new PrototypeSystem(
     candidate: {
       candidatePhone: "+91-REPLACE-WITH-YOUR-NUMBER",
       resumeUrl: "resume.pdf",
-      architectureUrl: "architecture.png",
     },
   },
   clock,

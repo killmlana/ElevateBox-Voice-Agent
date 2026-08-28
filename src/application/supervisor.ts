@@ -1,11 +1,13 @@
 import type {
   ActionCommand,
+  CallbackTimeResolverPort,
   ConversationDirective,
   LeadUnderstandingPort,
   LeadState,
   StableTurn,
 } from "../contracts.ts";
-import { resolveCallbackTime } from "../domain/callback-time.ts";
+import { callbackConfirmation } from "../domain/callback-time.ts";
+import { DeterministicCallbackTimeResolver } from "../infrastructure/model-callback-time.ts";
 import { DeterministicLeadClassifier } from "../domain/classifier.ts";
 import {
   applyLeadUpdate,
@@ -14,6 +16,7 @@ import {
 } from "../domain/lead-state.ts";
 import { LeadPolicy } from "../domain/policy.ts";
 import { addDeterministicNegativeSignals } from "../domain/negative-intent.ts";
+import { explicitLanguageChoice } from "../domain/language-choice.ts";
 import type { Clock } from "../contracts.ts";
 import { InMemoryEventStore } from "../infrastructure/event-store.ts";
 import type { ActionLifecycleEvent } from "./action-manager.ts";
@@ -36,6 +39,7 @@ export class Supervisor {
   private readonly events: InMemoryEventStore;
   private readonly orchestrator: ConversationOrchestrator;
   private readonly understanding: LeadUnderstandingPort;
+  private readonly callbackTimes: CallbackTimeResolverPort;
   private readonly classifier = new DeterministicLeadClassifier();
   private readonly policy = new LeadPolicy();
   private readonly calls = new Map<string, CallContext>();
@@ -45,11 +49,13 @@ export class Supervisor {
     events: InMemoryEventStore,
     orchestrator: ConversationOrchestrator,
     understanding: LeadUnderstandingPort,
+    callbackTimes: CallbackTimeResolverPort = new DeterministicCallbackTimeResolver(),
   ) {
     this.clock = clock;
     this.events = events;
     this.orchestrator = orchestrator;
     this.understanding = understanding;
+    this.callbackTimes = callbackTimes;
   }
 
   async startCall(callId: string): Promise<LeadState> {
@@ -173,15 +179,104 @@ export class Supervisor {
     const orderedApplyWaitMs = performance.now() - applyWaitStartedAt;
     const previous = context.state;
     let current = applyLeadUpdate(previous, update, this.clock.now().toISOString());
+    const selectedLanguage = explicitLanguageChoice(
+      turn.text,
+      turn.precedingAssistantText,
+    );
+    if (selectedLanguage) {
+      current = {
+        ...current,
+        language: selectedLanguage,
+        languageLocked: true,
+      };
+      await this.events.append({
+        callId,
+        type: "language.selection_locked",
+        payload: { language: selectedLanguage },
+        sourceTurnIds: [turn.turnId],
+      });
+    }
 
-    if (update.callbackPhrase) {
-      const resolution = resolveCallbackTime(update.callbackPhrase.value, this.clock.now());
+    const pendingProposal = previous.callback.awaitingConfirmation
+      ? previous.callback.proposedAt
+      : undefined;
+    const proposedReply = pendingProposal
+      ? callbackConfirmation(turn.text)
+      : "unknown";
+    const contextualResolution = pendingProposal && proposedReply === "negative"
+      ? await this.callbackTimes.resolve({
+        rawTime: `${previous.callback.rawTime ?? ""} ${turn.text}`.trim(),
+        now: this.clock.now(),
+        ...(current.language === "UNKNOWN"
+          ? {}
+          : { languageHint: current.language }),
+      })
+      : undefined;
+
+    if (pendingProposal && proposedReply === "affirmative") {
+      current = {
+        ...current,
+        callback: {
+          ...current.callback,
+          requested: true,
+          ...(previous.callback.rawTime
+            ? { rawTime: previous.callback.rawTime }
+            : {}),
+          resolvedAt: pendingProposal,
+          proposedAt: pendingProposal,
+          awaitingConfirmation: false,
+          declinedWithoutAlternative: false,
+          needsClarification: false,
+        },
+      };
+      await this.events.append({
+        callId,
+        type: "callback.proposal_confirmed",
+        payload: { resolvedAt: pendingProposal },
+        sourceTurnIds: [turn.turnId],
+      });
+    } else if (
+      pendingProposal &&
+      proposedReply === "negative" &&
+      contextualResolution?.status !== "resolved"
+    ) {
+      current = {
+        ...current,
+        callback: {
+          ...current.callback,
+          requested: false,
+          awaitingConfirmation: false,
+          declinedWithoutAlternative: true,
+          needsClarification: false,
+        },
+      };
+      await this.events.append({
+        callId,
+        type: "callback.proposal_declined_without_alternative",
+        payload: { proposedAt: pendingProposal },
+        sourceTurnIds: [turn.turnId],
+      });
+    } else if (contextualResolution?.status === "resolved" || update.callbackPhrase) {
+      const resolution = contextualResolution?.status === "resolved"
+        ? contextualResolution
+        : await this.callbackTimes.resolve({
+          rawTime: update.callbackPhrase!.value,
+          now: this.clock.now(),
+          ...(current.language === "UNKNOWN"
+            ? {}
+            : { languageHint: current.language }),
+        });
       current = {
         ...current,
         callback: {
           requested: resolution.status !== "not_requested",
-          rawTime: update.callbackPhrase.value,
+          ...((resolution.rawTime ?? update.callbackPhrase?.value)
+            ? { rawTime: resolution.rawTime ?? update.callbackPhrase!.value }
+            : {}),
           ...(resolution.resolvedAt ? { resolvedAt: resolution.resolvedAt } : {}),
+          ...(resolution.proposedAt ? { proposedAt: resolution.proposedAt } : {}),
+          awaitingConfirmation: Boolean(resolution.proposedAt),
+          declinedWithoutAlternative: false,
           needsClarification: resolution.status === "needs_clarification",
           booked: current.callback.booked,
         },
@@ -192,7 +287,7 @@ export class Supervisor {
           ? "callback.time_resolved"
           : "callback.time_needs_clarification",
         payload: resolution,
-        sourceTurnIds: update.callbackPhrase.sourceTurnIds,
+        sourceTurnIds: update.callbackPhrase?.sourceTurnIds ?? [turn.turnId],
       });
     }
 
@@ -200,6 +295,7 @@ export class Supervisor {
     current = {
       ...current,
       intent: classification.intent,
+      hotPeaked: current.hotPeaked || classification.intent === "HOT",
       intentScore: classification.score,
       intentScoreBreakdown: classification.scoreBreakdown,
       intentConfidence: classification.confidence,
@@ -272,6 +368,7 @@ export class Supervisor {
       kind: event.command.kind,
       attempt: event.attempt,
       ...(event.externalId ? { externalId: event.externalId } : {}),
+      ...(event.simulated === undefined ? {} : { simulated: event.simulated }),
       ...(event.error ? { error: event.error } : {}),
     };
     await this.events.append({
@@ -304,6 +401,7 @@ export class Supervisor {
           data: {
             kind: event.command.kind,
             externalId: event.externalId ?? "",
+            simulated: event.simulated === true,
           },
         });
       }
@@ -319,6 +417,15 @@ export class Supervisor {
         data: { kind: event.command.kind, error: event.error ?? "Unknown provider error" },
       });
     }
+  }
+
+  async recordTelemetry(
+    callId: string,
+    type: "call.latency_summary",
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    this.requireCall(callId);
+    await this.events.append({ callId, type, payload });
   }
 
   async endCall(callId: string): Promise<ActionCommand[]> {
@@ -354,11 +461,17 @@ export class Supervisor {
       ) kind = "SEND_HOT_DETAILS";
     } else if (context.state.intent === "WARM") {
       if (
+        context.state.buyingSignals.some(
+          (signal) => signal.value === "send_details",
+        ) &&
         !context.state.actions.finalFollowupSent &&
         !context.requestedActionKinds.has("SEND_FINAL_FOLLOWUP")
       ) kind = "SEND_FINAL_FOLLOWUP";
     } else if (context.state.intent === "COLD") {
       if (
+        context.state.buyingSignals.some(
+          (signal) => signal.value === "send_details",
+        ) &&
         !context.state.actions.coldBrochureSent &&
         !context.requestedActionKinds.has("SEND_COLD_BROCHURE")
       ) kind = "SEND_COLD_BROCHURE";

@@ -1,0 +1,76 @@
+; ElevateBox outbound-only example. Replace every angle-bracket placeholder.
+; Zadarma is the PSTN carrier. OpenAI is the AI SIP peer. Asterisk anchors media.
+; This sample uses Zadarma "Authorization by IP". Add the VPS public IP to the
+; trunk, then call Zadarma's 8888 service once to confirm it. The selected SIP
+; login becomes unavailable for password registration while the IP trunk exists.
+
+[transport-udp]
+type=transport
+protocol=udp
+bind=0.0.0.0:5060
+external_signaling_address=<PUBLIC_VPS_IP>
+external_media_address=<PUBLIC_VPS_IP>
+local_net=127.0.0.0/8
+
+[transport-tls]
+type=transport
+protocol=tls
+bind=0.0.0.0:5061
+method=tlsv1_2
+verify_server=yes
+ca_list_file=/etc/ssl/certs/ca-certificates.crt
+external_signaling_address=<PUBLIC_VPS_IP>
+external_media_address=<PUBLIC_VPS_IP>
+local_net=127.0.0.0/8
+
+; Primary PSTN carrier: Zadarma IP trunk (no REGISTER or outbound_auth).
+[zadarma]
+type=aor
+contact=sip:sip.zadarma.com
+qualify_frequency=60
+
+[zadarma]
+type=endpoint
+transport=transport-udp
+context=from-zadarma
+disallow=all
+allow=alaw
+allow=ulaw
+direct_media=no
+rtp_symmetric=yes
+force_rport=yes
+rewrite_contact=yes
+aors=zadarma
+from_user=<ZADARMA_SIP_LOGIN>
+from_domain=sip.zadarma.com
+; Leave P-Asserted-Identity unset so Zadarma selects the SIP connection's
+; default CallerID. Set this to yes only when explicitly choosing a connected
+; number through ElevateBox's optional ZADARMA_CALLER_ID.
+send_pai=no
+
+[zadarma-identify]
+type=identify
+endpoint=zadarma
+match=sip.zadarma.com
+match=sipurifr.zadarma.com
+match=sipde.zadarma.com
+match=sipuriny.zadarma.com
+
+; OpenAI Realtime SIP. ElevateBox supplies the project SIP URI through ARI.
+[openai]
+type=aor
+contact=sip:sip.api.openai.com:5061;transport=tls
+
+[openai]
+type=endpoint
+transport=transport-tls
+context=from-openai
+disallow=all
+allow=alaw
+allow=ulaw
+direct_media=no
+media_encryption=sdes
+rtp_symmetric=yes
+force_rport=yes
+rewrite_contact=yes
+aors=openai

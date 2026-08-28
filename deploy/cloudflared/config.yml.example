@@ -1,0 +1,10 @@
+tunnel: <CLOUDFLARE_TUNNEL_UUID>
+credentials-file: /etc/cloudflared/<CLOUDFLARE_TUNNEL_UUID>.json
+
+ingress:
+  # HTTPS control endpoints and POST /webhooks/openai/realtime use this tunnel.
+  # Never route SIP or RTP through Cloudflare Tunnel.
+  - hostname: voice.example.com
+    service: http://127.0.0.1:8080
+  - service: http_status:404
+

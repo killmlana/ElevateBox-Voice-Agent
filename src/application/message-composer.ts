@@ -3,8 +3,16 @@ import type { LeadState, OutgoingMessage } from "../contracts.ts";
 export interface CandidateContext {
   candidatePhone: string;
   resumeUrl: string;
-  architectureUrl: string;
-  brochureUrl?: string;
+}
+
+function naturalList(items: readonly string[]): string {
+  if (items.length <= 1) return items[0] ?? "";
+  if (items.length === 2) return `${items[0]} and ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")}, and ${items.at(-1)}`;
+}
+
+function cleanDetail(value: string): string {
+  return value.trim().replace(/\s+/g, " ").replace(/[.!?]+$/, "");
 }
 
 function money(value: number): string {
@@ -15,29 +23,51 @@ function money(value: number): string {
   }).format(value);
 }
 
-function contextLines(state: LeadState): string[] {
-  const lines: string[] = [];
-  if (state.businessDescription) {
-    lines.push(`business: ${state.businessDescription.value}`);
-  }
-  if (state.customerType.value !== "UNKNOWN") {
-    lines.push(`customer type: ${state.customerType.value.toLowerCase()}`);
-  }
-  if (state.locations.length > 0) {
-    lines.push(`locations: ${state.locations.map((item) => item.value).join(", ")}`);
-  }
-  if (state.products.length > 0) {
-    lines.push(`products: ${state.products.map((item) => item.value).join(", ")}`);
-  }
-  if (state.productCount) lines.push(`catalogue: ${state.productCount.value} products`);
-  if (state.budgetInr) lines.push(`budget: about ${money(state.budgetInr.value)}`);
-  if (state.timeline) lines.push(`timeline: ${state.timeline.value}`);
-  if (state.requirements.length > 0) {
-    lines.push(
-      `requirements: ${state.requirements.map((item) => item.value.text).join(", ")}`,
+function projectDetails(state: LeadState): string[] {
+  const facts: string[] = [];
+  if (state.productCount) {
+    facts.push(
+      `around ${new Intl.NumberFormat("en-IN").format(state.productCount.value)} products`,
     );
   }
-  return lines;
+  if (state.budgetInr) facts.push(`a budget of about ${money(state.budgetInr.value)}`);
+  if (state.timeline) facts.push(`a ${cleanDetail(state.timeline.value)} timeline`);
+
+  const requirements = state.requirements
+    .slice(0, 3)
+    .map((item) => cleanDetail(item.value.text))
+    .filter(Boolean);
+  return [
+    ...(facts.length > 0 ? [`You mentioned ${naturalList(facts)}.`] : []),
+    ...(requirements.length > 0
+      ? [`The main things you need are ${naturalList(requirements)}.`]
+      : []),
+  ];
+}
+
+function conversationTopic(state: LeadState): string {
+  if (state.businessDescription) {
+    return `the website for your ${cleanDetail(state.businessDescription.value)}`;
+  }
+  if (state.products.length > 0) {
+    const products = state.products
+      .slice(0, 2)
+      .map((item) => cleanDetail(item.value))
+      .filter(Boolean);
+    if (products.length > 0) return `your plan to sell ${naturalList(products)} online`;
+  }
+  if (state.requirements.length > 0) {
+    const requirement = cleanDetail(state.requirements[0]!.value.text);
+    if (requirement) return `your website and ${requirement}`;
+  }
+  return "the e-commerce website you are considering";
+}
+
+function introduction(phone: string, state: LeadState, briefly = false): string {
+  return [
+    `Hi, I am Ayanabh. My number is ${phone}.`,
+    `We spoke${briefly ? " briefly" : ""} about ${conversationTopic(state)}.`,
+  ].join(" ");
 }
 
 function callbackDisplay(isoTimestamp: string): string {
@@ -58,53 +88,53 @@ export class MessageComposer {
   }
 
   hotDetails(state: LeadState, idempotencyKey: string): OutgoingMessage {
-    const details = contextLines(state);
     return {
       to: this.leadPhone,
       body: [
-        "Thanks for discussing your e-commerce website with me.",
-        details.length > 0 ? `I noted ${details.join("; ")}.` : "I am sharing the project details we discussed.",
-        "I’ll keep the next step focused on these requirements.",
-        `You can reach me at ${this.candidate.candidatePhone}.`,
+        introduction(this.candidate.candidatePhone, state),
+        ...projectDetails(state),
+        "I have attached my resume as discussed.",
+        "Message me here if you would like to continue.",
       ].join(" "),
-      attachments: [this.candidate.resumeUrl, this.candidate.architectureUrl].filter(Boolean),
+      attachments: [this.candidate.resumeUrl].filter(Boolean),
       idempotencyKey,
+      consent: "EXPLICIT_WHATSAPP_OPT_IN",
     };
   }
 
   coldBrochure(state: LeadState, idempotencyKey: string): OutgoingMessage {
-    const context = state.businessDescription?.value ?? state.products[0]?.value;
     return {
       to: this.leadPhone,
       body: [
-        "Here’s a short ElevateBox e-commerce website brochure for whenever it becomes relevant.",
-        context ? `I noted your interest around ${context}.` : "There’s no pressure to decide now.",
-        `You can reach me at ${this.candidate.candidatePhone}.`,
+        introduction(this.candidate.candidatePhone, state, true),
+        ...projectDetails(state),
+        "I have attached my resume as promised.",
+        "No rush. Message me if it becomes useful later.",
       ].join(" "),
-      attachments: [
-        this.candidate.brochureUrl ?? this.candidate.architectureUrl,
-      ].filter(Boolean),
+      attachments: [this.candidate.resumeUrl].filter(Boolean),
       idempotencyKey,
+      consent: "EXPLICIT_WHATSAPP_OPT_IN",
     };
   }
 
   finalFollowup(state: LeadState, idempotencyKey: string): OutgoingMessage {
-    const details = contextLines(state);
     const callback = state.callback.resolvedAt
-      ? ` Callback requested for ${callbackDisplay(state.callback.resolvedAt)}.`
-      : "";
+      ? `You asked me to call you back on ${callbackDisplay(state.callback.resolvedAt)}.`
+      : undefined;
     return {
       to: this.leadPhone,
       body: [
-        "Thank you for the call.",
-        details.length > 0
-          ? `You’re looking for an e-commerce build with ${details.join("; ")}.`
-          : "I’m following up on the e-commerce website discussion.",
+        introduction(this.candidate.candidatePhone, state),
+        ...projectDetails(state),
         callback,
-        `My number is ${this.candidate.candidatePhone}.`,
-      ].join(" ").replace(/\s+/g, " ").trim(),
-      attachments: [this.candidate.resumeUrl, this.candidate.architectureUrl].filter(Boolean),
+        "I have attached my resume here.",
+        "Message me if I missed anything.",
+      ].filter(Boolean).join(" "),
+      attachments: [this.candidate.resumeUrl].filter(Boolean),
       idempotencyKey,
+      ...(state.buyingSignals.some((signal) => signal.value === "send_details")
+        ? { consent: "EXPLICIT_WHATSAPP_OPT_IN" as const }
+        : {}),
     };
   }
 }

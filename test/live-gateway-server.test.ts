@@ -5,7 +5,12 @@ import test from "node:test";
 import WebSocket from "ws";
 
 import type { PreparedCallHandle } from "../src/application/prepared-call-coordinator.ts";
-import type { SessionContext } from "../src/contracts.ts";
+import type {
+  OutboundDialAdapter,
+  OutboundDialRequest,
+  OutboundDialResult,
+  SessionContext,
+} from "../src/contracts.ts";
 import type {
   GatewayLiveConnection,
   LiveGatewayCoordinator,
@@ -72,7 +77,23 @@ class FakeGatewayCoordinator implements LiveGatewayCoordinator {
   }
 }
 
-async function startGateway(): Promise<{
+class FakeOutboundDialer implements OutboundDialAdapter {
+  readonly requests: OutboundDialRequest[] = [];
+  result: OutboundDialResult = {
+    providerCallId: "provider-call-1",
+    status: "in-progress",
+    simulated: false,
+  };
+  failure: Error | undefined;
+
+  async dial(request: OutboundDialRequest): Promise<OutboundDialResult> {
+    this.requests.push(request);
+    if (this.failure) throw this.failure;
+    return this.result;
+  }
+}
+
+async function startGateway(outboundDialer?: OutboundDialAdapter): Promise<{
   coordinator: FakeGatewayCoordinator;
   gateway: LiveGatewayServer;
   httpBaseUrl: string;
@@ -86,6 +107,7 @@ async function startGateway(): Promise<{
     host: "127.0.0.1",
     port: 0,
     mediaBasicAuth: { username: "exotel", password: "media-secret" },
+    ...(outboundDialer === undefined ? {} : { outboundDialer }),
   });
   const address = await gateway.listen();
   return {
@@ -128,7 +150,8 @@ test("authenticates preparation and bridges the single-use media socket", async 
       callId: "call-1",
       token: "prepared-token",
       expiresAt: coordinator.expiresAt,
-      streamUrl: "wss://voice.example.com/voice/media/prepared-token?sample-rate=24000",
+      ready: true,
+      provider: "exotel",
     });
     assert.deepEqual(coordinator.contexts, [{
       callId: "call-1",
@@ -153,6 +176,110 @@ test("authenticates preparation and bridges the single-use media socket", async 
     await once(client, "close");
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(coordinator.live.closed, true);
+  } finally {
+    await gateway.close();
+  }
+});
+
+test("cannot dial before prepare and consumes one READY media URL idempotently", async () => {
+  const dialer = new FakeOutboundDialer();
+  const { gateway, httpBaseUrl } = await startGateway(dialer);
+  const headers = {
+    authorization: "Bearer test-control-token-at-least-16",
+    "content-type": "application/json",
+  };
+  try {
+    const dialBody = {
+      callId: "call-dial",
+      token: "prepared-token",
+      to: "+919876543210",
+      idempotencyKey: "dial-call-dial-once",
+    };
+    const tooEarly = await fetch(`${httpBaseUrl}/calls/dial`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(dialBody),
+    });
+    assert.equal(tooEarly.status, 409);
+    assert.equal(dialer.requests.length, 0);
+
+    const prepared = await fetch(`${httpBaseUrl}/calls/prepare`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ callId: "call-dial", promptVersion: "v1" }),
+    });
+    assert.equal(prepared.status, 201);
+    const ready = await prepared.json() as Record<string, unknown>;
+    assert.equal(ready.ready, true);
+
+    const first = await fetch(`${httpBaseUrl}/calls/dial`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(dialBody),
+    });
+    assert.equal(first.status, 202);
+    assert.deepEqual(await first.json(), dialer.result);
+    assert.equal(dialer.requests.length, 1);
+    assert.equal(dialer.requests[0]?.media.ready, true);
+    assert.equal(
+      "streamUrl" in dialer.requests[0]!.media
+        ? dialer.requests[0]!.media.streamUrl
+        : undefined,
+      "wss://voice.example.com/voice/media/prepared-token?sample-rate=24000",
+    );
+    assert.equal("streamUrl" in ready, false, "media URL stays internal");
+
+    const replay = await fetch(`${httpBaseUrl}/calls/dial`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(dialBody),
+    });
+    assert.equal(replay.status, 202);
+    assert.deepEqual(await replay.json(), dialer.result);
+    assert.equal(dialer.requests.length, 1, "idempotent replay cannot redial");
+
+    const secondKey = await fetch(`${httpBaseUrl}/calls/dial`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ ...dialBody, idempotencyKey: "another-key" }),
+    });
+    assert.equal(secondKey.status, 409);
+    assert.equal(dialer.requests.length, 1);
+  } finally {
+    await gateway.close();
+  }
+});
+
+test("aborts prepared media after provider failure", async () => {
+  const dialer = new FakeOutboundDialer();
+  dialer.failure = new Error("provider failure with sensitive data");
+  const { coordinator, gateway, httpBaseUrl } = await startGateway(dialer);
+  const headers = {
+    authorization: "Bearer test-control-token-at-least-16",
+    "content-type": "application/json",
+  };
+  try {
+    const prepared = await fetch(`${httpBaseUrl}/calls/prepare`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ callId: "call-failure", promptVersion: "v1" }),
+    });
+    assert.equal(prepared.status, 201);
+    const failed = await fetch(`${httpBaseUrl}/calls/dial`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        callId: "call-failure",
+        token: "prepared-token",
+        to: "+919876543210",
+        idempotencyKey: "failed-once",
+      }),
+    });
+    assert.equal(failed.status, 502);
+    assert.deepEqual(await failed.json(), {
+      error: "Outbound provider did not accept the prepared call",
+    });
+    assert.deepEqual(coordinator.abortedTokens, ["prepared-token"]);
   } finally {
     await gateway.close();
   }
@@ -209,4 +336,40 @@ test("aborts an unused prewarmed session when the gateway shuts down", async () 
 
   await gateway.close();
   assert.deepEqual(coordinator.abortedTokens, ["prepared-token"]);
+});
+
+test("exposes only the signed OpenAI webhook surface for the Zadarma/Asterisk route", async () => {
+  const coordinator = new FakeGatewayCoordinator();
+  let receivedBody: Buffer | undefined;
+  let receivedWebhookId: string | string[] | undefined;
+  const gateway = new LiveGatewayServer({
+    coordinator,
+    provider: "asterisk-sip",
+    controlApiToken: "test-control-token-at-least-16",
+    openAIWebhookReceiver: {
+      async handle(rawBody, headers) {
+        receivedBody = rawBody;
+        receivedWebhookId = headers["webhook-id"];
+        return "processed";
+      },
+    },
+    host: "127.0.0.1",
+    port: 0,
+  });
+  const address = await gateway.listen();
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  try {
+    const exactBody = ' {"type":"realtime.call.incoming"}\n';
+    const response = await fetch(`${baseUrl}/webhooks/openai/realtime`, {
+      method: "POST",
+      headers: { "webhook-id": "delivery-raw-1" },
+      body: exactBody,
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { received: true, duplicate: false });
+    assert.equal(receivedBody?.toString("utf8"), exactBody);
+    assert.equal(receivedWebhookId, "delivery-raw-1");
+  } finally {
+    await gateway.close();
+  }
 });

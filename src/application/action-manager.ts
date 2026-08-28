@@ -12,6 +12,7 @@ export interface ActionLifecycleEvent {
   command: ActionCommand;
   attempt: number;
   externalId?: string;
+  simulated?: boolean;
   error?: string;
 }
 
@@ -55,19 +56,25 @@ export class ActionManager {
     for (let attempt = 1; attempt <= command.maxAttempts; attempt += 1) {
       await sink({ type: "action.started", command, attempt });
       try {
-        const externalId = await this.dispatch(command);
+        const dispatched = await this.dispatch(command);
         const result: ActionResult = {
           command,
           status: "SUCCEEDED",
           attempt,
-          externalId,
+          externalId: dispatched.externalId,
+          ...(dispatched.simulated === undefined
+            ? {}
+            : { simulated: dispatched.simulated }),
         };
         this.completed.set(command.idempotencyKey, result);
         await sink({
           type: "action.succeeded",
           command,
           attempt,
-          externalId,
+          externalId: dispatched.externalId,
+          ...(dispatched.simulated === undefined
+            ? {}
+            : { simulated: dispatched.simulated }),
         });
         return result;
       } catch (error) {
@@ -92,7 +99,10 @@ export class ActionManager {
     throw new Error(lastError);
   }
 
-  private async dispatch(command: ActionCommand): Promise<string> {
+  private async dispatch(command: ActionCommand): Promise<{
+    externalId: string;
+    simulated?: boolean;
+  }> {
     if (command.kind === "BOOK_CALLBACK") {
       const resolvedAt = String(command.payload.resolvedAt ?? "");
       const rawTime = String(command.payload.rawTime ?? "");
@@ -102,8 +112,11 @@ export class ActionManager {
         scheduledAt: resolvedAt,
         rawTime,
         idempotencyKey: command.idempotencyKey,
+        ...(command.payload.preferredLanguage
+          ? { preferredLanguage: command.payload.preferredLanguage as LeadState["language"] }
+          : {}),
       });
-      return result.externalId;
+      return result;
     }
 
     const state = command.payload.state as LeadState | undefined;
@@ -114,6 +127,6 @@ export class ActionManager {
         ? this.composer.coldBrochure(state, command.idempotencyKey)
         : this.composer.finalFollowup(state, command.idempotencyKey);
     const result = await this.messaging.send(message);
-    return result.externalId;
+    return result;
   }
 }

@@ -65,6 +65,7 @@ export function createLeadState(callId: string, now: string): LeadState {
     callId,
     callState: "CREATED",
     language: "UNKNOWN",
+    languageLocked: false,
     customerType: {
       value: "UNKNOWN",
       sourceTurnIds: [],
@@ -82,12 +83,15 @@ export function createLeadState(callId: string, now: string): LeadState {
     buyingSignals: [],
     negativeSignals: [],
     intent: "UNKNOWN",
+    hotPeaked: false,
     intentScore: 0,
     intentScoreBreakdown: [],
     intentConfidence: 0,
     intentEvidenceTurnIds: [],
     callback: {
       requested: false,
+      awaitingConfirmation: false,
+      declinedWithoutAlternative: false,
       needsClarification: false,
       booked: false,
     },
@@ -108,7 +112,9 @@ export function applyLeadUpdate(
 ): LeadState {
   return {
     ...state,
-    language: chooseLanguage(state.language, update.language),
+    language: state.languageLocked
+      ? state.language
+      : chooseLanguage(state.language, update.language),
     ...(update.businessDescription
       ? { businessDescription: update.businessDescription }
       : {}),
